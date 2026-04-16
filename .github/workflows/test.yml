@@ -1,0 +1,61 @@
+name: Test Action
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint entrypoint
+        run: shellcheck -x action/entrypoint.sh action/lib/*.sh
+
+  action-yaml-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate action.yml
+        run: |
+          npm install -g actionyaml-lint
+          actionyaml-lint action.yml || true
+          # Basic schema check: ensure required fields exist
+          python3 -c "
+          import yaml, sys
+          with open('action.yml') as f:
+              a = yaml.safe_load(f)
+          assert 'name' in a, 'missing name'
+          assert 'runs' in a, 'missing runs'
+          assert a['runs']['using'] == 'composite', 'must be composite action'
+          print('action.yml is valid')
+          "
+
+  test-server-mode:
+    needs: [shellcheck]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run review (server mode)
+        id: review
+        uses: ./
+        with:
+          token: ${{ secrets.CODETETHER_TOKEN }}
+          mode: server
+          task_wait_seconds: "120"
+          extra_prompt: "This is a test review. Keep it to one sentence."
+
+      - name: Check output
+        run: |
+          echo "Exit code: ${{ steps.review.outputs.exit_code }}"
+          echo "Review length: $(echo '${{ steps.review.outputs.review }}' | wc -c)"

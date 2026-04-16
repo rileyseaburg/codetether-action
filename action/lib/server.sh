@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Server mode: dispatch task to A2A server, poll for completion, return result.
+# Sourced by entrypoint.sh.
+
+# ── Dispatch a task to the CodeTether server ─────────────────────
+# Usage: dispatch_server_task "$description" "$title" "$idempotency_key"
+# Sets: TASK_ID, REVIEW_TEXT
+dispatch_server_task() {
+  local description="$1"
+  local title="$2"
+  local idempotency_key="${3:-}"
+
+  if [ -z "${CODETETHER_SERVER:-}" ]; then
+    echo "::error::server_url is required in server mode"
+    exit 1
+  fi
+  if [ -z "${CODETETHER_TOKEN:-}" ]; then
+    echo "::error::token is required in server mode"
+    exit 1
+  fi
+
+  local max_chars=99000
+  local truncated_desc="${description:0:$max_chars}"
+  if [ ${#description} -gt "$max_chars" ]; then
+    echo "⚠ Description truncated from ${#description} to ${max_chars} chars"
+  fi
+
+  local metadata_block
+  metadata_block=$(build_metadata_json)
+
+  local task_payload
+  task_payload=$(jq -n \
+    --arg description "$truncated_desc" \
+    --arg agent_type "$INPUT_AGENT_TYPE" \
+    --arg title "$title" \
+    --argjson metadata "$metadata_block" \
+    '{
+      title: $title,
+      description: $description,
+      agent_type: $agent_type,
+      metadata: $metadata
+    }')
+
+  local curl_args=(
+    -sS -o /tmp/codetether-response.json -w "%{http_code}"
+    -X POST "${CODETETHER_SERVER}/v1/tasks/dispatch"
+    -H "Authorization: Bearer ${CODETETHER_TOKEN}"
+    -H "Content-Type: application/json"
+    -d "$task_payload"
+  )
+  if [ -n "$idempotency_key" ]; then
+    curl_args+=(-H "Idempotency-Key: ${idempotency_key}")
+  fi
+
+  local http_code
+  http_code=$(curl "${curl_args[@]}")
+
+  local response
+  response="$(cat /tmp/codetether-response.json)"
+  if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    echo "::error::Server returned HTTP ${http_code}: ${response}"
+    REVIEW_TEXT="Server dispatch failed (HTTP ${http_code})."
+    TASK_ID=""
+    return 1
+  fi
+
+  TASK_ID=$(echo "$response" | jq -r '.task_id // "unknown"')
+  echo "Task dispatched: ${TASK_ID}"
+
+  if [ "$TASK_ID" = "unknown" ]; then
+    echo "::error::Failed to dispatch task: ${response}"
+    REVIEW_TEXT="Failed to dispatch task."
+    return 1
+  fi
+}
+
+# ── Poll server for task completion ──────────────────────────────
+# Sets: REVIEW_TEXT
+poll_task_result() {
+  local poll_interval=5
+  local max_poll=$(( (TASK_WAIT_SECONDS + poll_interval - 1) / poll_interval ))
+  local poll_count=0
+  local task_status="pending"
+
+  while [ "$poll_count" -lt "$max_poll" ] \
+      && [ "$task_status" != "completed" ] \
+      && [ "$task_status" != "failed" ] \
+      && [ "$task_status" != "canceled" ]; do
+    sleep "$poll_interval"
+    poll_count=$((poll_count + 1))
+    local task_response
+    task_response=$(curl -fsSL \
+      -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
+      "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}" 2>/dev/null || echo '{}')
+    task_status=$(echo "$task_response" | jq -r '.status // "unknown"')
+    echo "  Poll ${poll_count}/${max_poll}: status=${task_status}"
+  done
+
+  if [ "$task_status" = "completed" ]; then
+    local result_response
+    result_response=$(curl -fsSL \
+      -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
+      "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}")
+    local result_text
+    result_text=$(echo "$result_response" | jq -r '.result // "No response returned."')
+    REVIEW_TEXT=$(echo "$result_text" | head -c 65000)
+  elif [ "$task_status" = "failed" ]; then
+    REVIEW_TEXT="Task failed. Check server logs for task ${TASK_ID}."
+  else
+    REVIEW_TEXT="Task timed out after ${TASK_WAIT_SECONDS}s (status: ${task_status}). Task ID: ${TASK_ID}"
+  fi
+}
+
+# ── Build metadata JSON for task dispatch ────────────────────────
+build_metadata_json() {
+  local pr_number="${PR_NUMBER:-0}"
+  jq -n \
+    --arg source "github-actions" \
+    --arg repo "${REPO_FULL_NAME}" \
+    --argjson pr_num "${pr_number:-0}" \
+    '{
+      source: $source,
+      repo: $repo,
+      pr_number: $pr_num,
+      issue_number: $pr_num
+    }'
+}
