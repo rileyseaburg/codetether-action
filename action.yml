@@ -30,9 +30,15 @@ inputs:
     required: false
     default: "true"
   agent_type:
-    description: "Agent type for task dispatch"
+    description: "Agent type for task dispatch (overridden by preset)"
     required: false
     default: "code-review"
+  preset:
+    description: >-
+      Review focus preset: review (default), security, quality,
+      performance, architecture, or a freeform prompt for a custom focus.
+    required: false
+    default: "review"
 
   # --- Advanced: self-hosted / BYOK mode ---
   mode:
@@ -138,6 +144,7 @@ runs:
         INPUT_EXTRA_PROMPT: ${{ inputs.extra_prompt }}
         INPUT_AUTO_COMMENT: ${{ inputs.auto_comment }}
         INPUT_AGENT_TYPE: ${{ inputs.agent_type }}
+        INPUT_PRESET: ${{ inputs.preset }}
         INPUT_WORKSPACE_PATH: ${{ inputs.workspace_path }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
         PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}

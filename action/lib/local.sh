@@ -37,7 +37,7 @@ gather_diff() {
   echo "::endgroup::"
 }
 
-# ── Build a review prompt from the current diff ──────────────────
+# ── Build a review prompt using the active preset ────────────────
 # Usage: build_review_prompt
 # Sets: PROMPT
 build_review_prompt() {
@@ -48,16 +48,12 @@ build_review_prompt() {
     return
   fi
 
-  PROMPT="You are reviewing PR #${PR_NUMBER}: \"${PR_TITLE}\" (${PR_HEAD} → ${PR_BASE}).
+  local preset_instructions
+  preset_instructions="$(build_preset_prompt \
+    "$(cat "$DIFF_FILE")" \
+    "${PR_BASE}" "${PR_HEAD}" "${PR_NUMBER}" "${PR_TITLE}")"
 
-Review the following diff and report:
-1. **Bugs** — logic errors, off-by-one, null/unwrap safety
-2. **Security** — OWASP Top 10, injection, auth bypass, secrets exposure
-3. **Performance** — unnecessary allocations, O(n²) patterns, missing indexes
-4. **Style** — naming, dead code, missing error handling
-
-Be concise. Only comment on real issues, not nitpicks.
-If the code looks good, say so briefly.
+  PROMPT="${preset_instructions}
 
 ${INPUT_EXTRA_PROMPT:+Additional instructions: ${INPUT_EXTRA_PROMPT}}
 
@@ -87,7 +83,9 @@ run_local_review() {
 
   if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
     echo "::group::Posting review comment"
-    local comment_body="## 🔍 CodeTether Review
+    local preset_label
+    preset_label="$(preset_label)"
+    local comment_body="## 🔍 CodeTether Review (${preset_label})
 
 <details>
 <summary>PR #${PR_NUMBER}: ${PR_TITLE}</summary>

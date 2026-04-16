@@ -14,6 +14,8 @@ source "${SCRIPT_DIR}/lib/github.sh"
 source "${SCRIPT_DIR}/lib/server.sh"
 # shellcheck source=lib/local.sh
 source "${SCRIPT_DIR}/lib/local.sh"
+# shellcheck source=lib/presets.sh
+source "${SCRIPT_DIR}/lib/presets.sh"
 
 # ── Parse comment context from event payload ─────────────────────
 parse_comment_context() {
@@ -126,7 +128,9 @@ run_server_review() {
 
   if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ] \
       && [ "${TASK_STATUS:-}" = "completed" ]; then
-    local comment="## 🔍 CodeTether Review
+    local preset_label
+    preset_label="$(preset_label)"
+    local comment="## 🔍 CodeTether Review (${preset_label})
 
 <details><summary>PR #${PR_NUMBER}: ${PR_TITLE}</summary>
 

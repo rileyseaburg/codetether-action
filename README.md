@@ -61,6 +61,50 @@ That's it. Every PR gets an automated review comment.
 - **Server mode** (default) — no API keys needed, runs on CodeTether cloud
 - **Local mode** (BYOK) — run on your own infrastructure with your own LLM keys
 
+## Presets
+
+Run multiple specialized reviews on the same PR by using the `preset` input:
+
+```yaml
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: rileyseaburg/codetether-action@v1
+        with:
+          token: ${{ secrets.CODETETHER_TOKEN }}
+          preset: security
+
+  quality:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: rileyseaburg/codetether-action@v1
+        with:
+          token: ${{ secrets.CODETETHER_TOKEN }}
+          preset: quality
+```
+
+### Built-in Presets
+
+| Preset | Focus | Icon |
+|--------|-------|------|
+| `review` | General review (bugs, security, perf, style) | 🔍 |
+| `security` | OWASP Top 10, injection, auth, crypto, supply chain | 🔒 |
+| `quality` | Readability, complexity, DRY, testing, docs | ✨ |
+| `performance` | Algorithmic complexity, memory, I/O, concurrency | ⚡ |
+| `architecture` | Coupling, API design, extensibility, trade-offs | 🏗️ |
+| *(freeform text)* | Custom instructions — any string becomes the reviewer prompt | — |
+
+Each preset posts a separate comment with its own icon, so you can run them in parallel.
+
 ## Inputs
 
 | Input | Description | Default |
@@ -68,9 +112,10 @@ That's it. Every PR gets an automated review comment.
 | `token` | CodeTether API token (**required**) | — |
 | `server_url` | CodeTether server URL | `https://api.codetether.run` |
 | `mode` | `server` or `local` | `server` |
+| `preset` | Review focus: `review`, `security`, `quality`, `performance`, `architecture`, or freeform | `review` |
 | `extra_prompt` | Additional instructions for the reviewer | `""` |
 | `auto_comment` | Post review as PR comment | `true` |
-| `agent_type` | Agent type for task dispatch | `code-review` |
+| `agent_type` | Agent type for task dispatch (overridden by preset) | `code-review` |
 | `model` | LLM model (local mode) | `glm-5.1` |
 | `max_steps` | Max agentic iterations (local mode) | `30` |
 | `task_wait_seconds` | Timeout for server tasks | `1200` |

@@ -28,10 +28,13 @@ dispatch_server_task() {
   local metadata_block
   metadata_block=$(build_metadata_json)
 
+  local effective_agent_type
+  effective_agent_type="$(preset_agent_type)"
+
   local task_payload
   task_payload=$(jq -n \
     --arg description "$truncated_desc" \
-    --arg agent_type "$INPUT_AGENT_TYPE" \
+    --arg agent_type "$effective_agent_type" \
     --arg title "$title" \
     --argjson metadata "$metadata_block" \
     '{
