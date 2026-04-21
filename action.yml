@@ -153,4 +153,4 @@ runs:
         PR_BASE: ${{ github.event.pull_request.base.ref || '' }}
         PR_HEAD: ${{ github.event.pull_request.head.ref || '' }}
         REPO_FULL_NAME: ${{ github.repository }}
-      run: ${{ github.action_path }}/entrypoint.sh
+      run: ${{ github.action_path }}/action/entrypoint.sh
