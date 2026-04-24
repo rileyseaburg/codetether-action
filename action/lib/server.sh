@@ -78,24 +78,27 @@ dispatch_server_task() {
 }
 
 # ── Poll server for task completion ──────────────────────────────
-# Sets: REVIEW_TEXT
+# Sets: REVIEW_TEXT, TASK_STATUS
 poll_task_result() {
   local poll_interval=5
   local max_poll=$(( (TASK_WAIT_SECONDS + poll_interval - 1) / poll_interval ))
   local poll_count=0
   local task_status="pending"
+  local task_response='{}'
+  TASK_STATUS="$task_status"
 
   while [ "$poll_count" -lt "$max_poll" ] \
       && [ "$task_status" != "completed" ] \
       && [ "$task_status" != "failed" ] \
-      && [ "$task_status" != "canceled" ]; do
+      && [ "$task_status" != "canceled" ] \
+      && [ "$task_status" != "cancelled" ]; do
     sleep "$poll_interval"
     poll_count=$((poll_count + 1))
-    local task_response
     task_response=$(curl -fsSL \
       -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
       "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}" 2>/dev/null || echo '{}')
     task_status=$(echo "$task_response" | jq -r '.status // "unknown"')
+    TASK_STATUS="$task_status"
     echo "  Poll ${poll_count}/${max_poll}: status=${task_status}"
   done
 
@@ -107,11 +110,19 @@ poll_task_result() {
     local result_text
     result_text=$(echo "$result_response" | jq -r '.result // "No response returned."')
     REVIEW_TEXT=$(echo "$result_text" | head -c 65000)
-  elif [ "$task_status" = "failed" ]; then
-    REVIEW_TEXT="Task failed. Check server logs for task ${TASK_ID}."
+  elif [ "$task_status" = "failed" ] || [ "$task_status" = "canceled" ] || [ "$task_status" = "cancelled" ]; then
+    local error_text
+    error_text=$(echo "$task_response" | jq -r '.error // .result // empty')
+    if [ -n "$error_text" ]; then
+      REVIEW_TEXT="Task ${task_status}. ${error_text} Task ID: ${TASK_ID}"
+    else
+      REVIEW_TEXT="Task ${task_status}. Check server logs for task ${TASK_ID}."
+    fi
   else
     REVIEW_TEXT="Task timed out after ${TASK_WAIT_SECONDS}s (status: ${task_status}). Task ID: ${TASK_ID}"
   fi
+
+  export TASK_STATUS
 }
 
 # ── Build metadata JSON for task dispatch ────────────────────────
