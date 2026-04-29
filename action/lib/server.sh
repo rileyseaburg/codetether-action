@@ -5,24 +5,25 @@
 # ── Dispatch a task to the CodeTether server ─────────────────────
 # Usage: dispatch_server_task "$description" "$title" "$idempotency_key"
 # Sets: TASK_ID, REVIEW_TEXT
+# Returns: 0 on success, 1 on failure (action should exit non-zero).
 dispatch_server_task() {
   local description="$1"
   local title="$2"
   local idempotency_key="${3:-}"
 
   if [ -z "${CODETETHER_SERVER:-}" ]; then
-    echo "::error::server_url is required in server mode"
+    log_error "server_url is required in server mode"
     exit 1
   fi
   if [ -z "${CODETETHER_TOKEN:-}" ]; then
-    echo "::error::token is required in server mode"
+    log_error "token is required in server mode"
     exit 1
   fi
 
   local max_chars=99000
   local truncated_desc="${description:0:$max_chars}"
   if [ ${#description} -gt "$max_chars" ]; then
-    echo "⚠ Description truncated from ${#description} to ${max_chars} chars"
+    log_warn "Description truncated from ${#description} to ${max_chars} chars"
   fi
 
   local metadata_block
@@ -56,22 +57,25 @@ dispatch_server_task() {
   fi
 
   local http_code
-  http_code=$(curl "${curl_args[@]}")
+  http_code=$(curl "${curl_args[@]}" 2>&1 | tee -a "${CODETETHER_LOG_FILE}")
+  local curl_exit=${PIPESTATUS[0]:-0}
 
   local response
   response="$(cat /tmp/codetether-response.json)"
+  save_artifact "dispatch-response.json" "$response"
+
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-    echo "::error::Server returned HTTP ${http_code}: ${response}"
+    log_error "Server returned HTTP ${http_code}: ${response}"
     REVIEW_TEXT="Server dispatch failed (HTTP ${http_code})."
     TASK_ID=""
     return 1
   fi
 
   TASK_ID=$(echo "$response" | jq -r '.task_id // "unknown"')
-  echo "Task dispatched: ${TASK_ID}"
+  log_info "Task dispatched: ${TASK_ID}"
 
   if [ "$TASK_ID" = "unknown" ]; then
-    echo "::error::Failed to dispatch task: ${response}"
+    log_error "Failed to dispatch task: ${response}"
     REVIEW_TEXT="Failed to dispatch task."
     return 1
   fi
@@ -79,6 +83,7 @@ dispatch_server_task() {
 
 # ── Poll server for task completion ──────────────────────────────
 # Sets: REVIEW_TEXT, TASK_STATUS
+# Returns: 0 if completed successfully, 1 if failed/timeout (action should exit non-zero).
 poll_task_result() {
   local poll_interval=5
   local max_poll=$(( (TASK_WAIT_SECONDS + poll_interval - 1) / poll_interval ))
@@ -99,8 +104,11 @@ poll_task_result() {
       "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}" 2>/dev/null || echo '{}')
     task_status=$(echo "$task_response" | jq -r '.status // "unknown"')
     TASK_STATUS="$task_status"
-    echo "  Poll ${poll_count}/${max_poll}: status=${task_status}"
+    echo "  Poll ${poll_count}/${max_poll}: status=${task_status}" | tee -a "${CODETETHER_LOG_FILE}"
   done
+
+  # Export for callers that need the final status
+  TASK_STATUS="$task_status"
 
   if [ "$task_status" = "completed" ]; then
     local result_response
@@ -110,6 +118,9 @@ poll_task_result() {
     local result_text
     result_text=$(echo "$result_response" | jq -r '.result // "No response returned."')
     REVIEW_TEXT=$(echo "$result_text" | head -c 65000)
+    save_artifact "task-result.txt" "$REVIEW_TEXT"
+    log_info "Task ${TASK_ID} completed successfully"
+    return 0
   elif [ "$task_status" = "failed" ] || [ "$task_status" = "canceled" ] || [ "$task_status" = "cancelled" ]; then
     local error_text
     error_text=$(echo "$task_response" | jq -r '.error // .result // empty')
@@ -118,8 +129,14 @@ poll_task_result() {
     else
       REVIEW_TEXT="Task ${task_status}. Check server logs for task ${TASK_ID}."
     fi
+    log_error "Task ${TASK_ID} ${task_status^^} on the server"
+    save_artifact "task-failure.txt" "Task ${TASK_ID} failed with status: ${task_status}"
+    return 1
   else
     REVIEW_TEXT="Task timed out after ${TASK_WAIT_SECONDS}s (status: ${task_status}). Task ID: ${TASK_ID}"
+    log_error "Task ${TASK_ID} TIMED OUT — status was '${task_status}' after ${TASK_WAIT_SECONDS}s"
+    save_artifact "task-timeout.txt" "Task ${TASK_ID} timed out with status: ${task_status}"
+    return 1
   fi
 
   export TASK_STATUS

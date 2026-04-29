@@ -3,3 +3,4 @@ target/
 *.swo
 *~
 .DS_Store
+.codetether-agent/
