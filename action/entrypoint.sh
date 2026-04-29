@@ -97,8 +97,9 @@ Analyzing issue #${PR_NUMBER}... Will post results when complete."
   else
     local review_file
     review_file="$(mktemp)"
-    if ! run_local_codetether "$prompt" "$review_file"; then
-      local ec=$?
+    run_local_codetether "$prompt" "$review_file"
+    local ec=$?
+    if [ "$ec" -ne 0 ]; then
       task_failed="true"
       review_text=$(head -c 65000 "$review_file")
       log_error "codetether failed for issue #${PR_NUMBER} (exit ${ec})"

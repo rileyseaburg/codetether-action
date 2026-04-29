@@ -158,7 +158,6 @@ runs:
         INPUT_WORKSPACE_PATH: ${{ inputs.workspace_path }}
         INPUT_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
-        GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_SERVER_URL: ${{ github.server_url }}
         PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}

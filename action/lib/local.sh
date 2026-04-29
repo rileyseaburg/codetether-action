@@ -179,8 +179,9 @@ After editing files, run the smallest relevant validation needed to support the 
   local fix_file
   fix_file="$(mktemp)"
 
-  if ! run_local_codetether "${fix_prompt}" "${fix_file}"; then
-    local ec=$?
+  run_local_codetether "${fix_prompt}" "${fix_file}"
+  local ec=$?
+  if [ "$ec" -ne 0 ]; then
     local msg="I couldn't apply the requested changes automatically. Review the workflow logs for details."
     [ "${INPUT_AUTO_COMMENT}" = "true" ] && post_github_comment "${PR_NUMBER}" "## 🛠️ CodeTether Fix
 

@@ -13,7 +13,8 @@ post_github_comment() {
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
     "https://api.github.com/repos/${REPO_FULL_NAME}/issues/${target_number}/comments" \
-    -d "$(jq -n --arg body "$body" '{body: $body}')" 2>&1) || true
+    -d "$(jq -n --arg body "$body" '{body: $body}')" 2>> "${CODETETHER_LOG_FILE}") || :
+  [ -z "$resp" ] && resp="000"
   if [ "$resp" -ge 200 ] && [ "$resp" -lt 300 ]; then
     log_info "Comment posted to #${target_number} (HTTP ${resp})"
   else
@@ -53,7 +54,8 @@ github_api_post() {
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
     "https://api.github.com${path}" \
-    -d "$payload" 2>&1)
+    -d "$payload" 2>> "${CODETETHER_LOG_FILE}") || :
+  [ -z "$http_code" ] && http_code="000"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
     log_error "${desc} failed (HTTP ${http_code}): $(cat /tmp/codetether-gh-response.json 2>/dev/null || echo 'no response body')"
     return 1
@@ -78,7 +80,8 @@ verify_branch_pushed() {
   ref_response=$(curl -sS -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${branch}" 2>&1) || true
+    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${branch}" 2>> "${CODETETHER_LOG_FILE}") || :
+  [ -z "$ref_response" ] && ref_response="000"
   if [ "$ref_response" -ge 200 ] && [ "$ref_response" -lt 300 ]; then
     log_info "Branch '${branch}' verified on remote (HTTP ${ref_response})"
     return 0
@@ -96,7 +99,7 @@ verify_commit_on_branch() {
   local response
   response=$(github_api_get "/repos/${REPO_FULL_NAME}/branches/${branch}" 2>/dev/null) || true
   local actual_sha
-  actual_sha=$(echo "$response" | jq -r '.commit.sha // empty')
+  actual_sha=$(echo "$response" | jq -r '.commit.sha // empty' 2>/dev/null) || true
   if [ "$actual_sha" = "$expected_sha" ]; then
     log_info "Commit ${expected_sha:0:8} verified on branch '${branch}'"
     return 0

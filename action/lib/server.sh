@@ -57,11 +57,18 @@ dispatch_server_task() {
   fi
 
   local http_code
-  http_code=$(curl "${curl_args[@]}" 2>&1 | tee -a "${CODETETHER_LOG_FILE}")
-  local curl_exit=${PIPESTATUS[0]:-0}
+  http_code=$(curl "${curl_args[@]}" 2>> "${CODETETHER_LOG_FILE}")
+  local curl_exit=$?
+  [ -z "$http_code" ] && http_code="000"
 
   local response
-  response="$(cat /tmp/codetether-response.json)"
+  response="$(cat /tmp/codetether-response.json 2>/dev/null || true)"
+  if [ -z "$response" ]; then
+    log_error "No response received from server (curl exit ${curl_exit})"
+    REVIEW_TEXT="Server dispatch failed — no response received."
+    TASK_ID=""
+    return 1
+  fi
   save_artifact "dispatch-response.json" "$response"
 
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then

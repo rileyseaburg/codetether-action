@@ -87,12 +87,23 @@ finalize_run() {
       echo "${summary_line}"
       echo ""
       if [ -f "${CODETETHER_LOG_FILE}" ]; then
-        echo "<details><summary>Full action log</summary>"
-        echo ""
-        echo '```'
-        cat "${CODETETHER_LOG_FILE}"
-        echo '```'
-        echo "</details>"
+        local log_size
+        log_size=$(wc -c < "${CODETETHER_LOG_FILE}")
+        if [ "$log_size" -gt 10240 ]; then
+          echo "<details><summary>Action log (last 10 KB of ${log_size} bytes — full log in uploaded artifact)</summary>"
+          echo ""
+          echo '```'
+          tail -c 10240 "${CODETETHER_LOG_FILE}"
+          echo '```'
+          echo "</details>"
+        else
+          echo "<details><summary>Full action log</summary>"
+          echo ""
+          echo '```'
+          cat "${CODETETHER_LOG_FILE}"
+          echo '```'
+          echo "</details>"
+        fi
       fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi
