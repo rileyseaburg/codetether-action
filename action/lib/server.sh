@@ -152,14 +152,20 @@ poll_task_result() {
 # ── Build metadata JSON for task dispatch ────────────────────────
 build_metadata_json() {
   local pr_number="${PR_NUMBER:-0}"
+  local steps="${INPUT_MAX_STEPS:-50}"
+  local timeout="${TASK_WAIT_SECONDS:-3600}"
   jq -n \
     --arg source "github-actions" \
     --arg repo "${REPO_FULL_NAME}" \
     --argjson pr_num "${pr_number:-0}" \
+    --argjson max_steps "${steps}" \
+    --argjson task_timeout_seconds "${timeout}" \
     '{
       source: $source,
       repo: $repo,
       pr_number: $pr_num,
-      issue_number: $pr_num
+      issue_number: $pr_num,
+      max_steps: $max_steps,
+      task_timeout_seconds: $task_timeout_seconds
     }'
 }
