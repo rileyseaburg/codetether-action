@@ -61,13 +61,13 @@ inputs:
     required: false
     default: "glm-5.1"
   max_steps:
-    description: "Maximum agentic loop iterations (local mode only)"
+    description: "Maximum agentic loop iterations (applies to both local and server mode)"
     required: false
-    default: "30"
+    default: "50"
   task_wait_seconds:
-    description: "How long to wait for server-dispatched tasks before timing out"
+    description: "How long to wait for server-dispatched tasks before timing out (seconds, default 3600 = 1 hour)"
     required: false
-    default: "1800"
+    default: "3600"
   timeout_minutes:
     description: "GitHub Actions job-level timeout in minutes (set this in your workflow's timeout-minutes, not here)"
     required: false
