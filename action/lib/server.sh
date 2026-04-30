@@ -11,6 +11,8 @@ dispatch_server_task() {
   local title="$2"
   local idempotency_key="${3:-}"
 
+  checkpoint "server: BEFORE dispatch_server_task — '${title}'"
+
   if [ -z "${CODETETHER_SERVER:-}" ]; then
     log_error "server_url is required in server mode"
     exit 1
@@ -57,8 +59,10 @@ dispatch_server_task() {
   fi
 
   local http_code
+  checkpoint "server: BEFORE curl POST ${CODETETHER_SERVER}/v1/tasks/dispatch"
   http_code=$(curl "${curl_args[@]}" 2>> "${CODETETHER_LOG_FILE}")
   local curl_exit=$?
+  checkpoint "server: AFTER curl POST — http_code=${http_code} curl_exit=${curl_exit}"
   [ -z "$http_code" ] && http_code="000"
 
   local response
@@ -92,6 +96,7 @@ dispatch_server_task() {
 # Sets: REVIEW_TEXT, TASK_STATUS
 # Returns: 0 if completed successfully, 1 if failed/timeout (action should exit non-zero).
 poll_task_result() {
+  checkpoint "server: BEFORE poll_task_result — task ${TASK_ID}, max_wait=${TASK_WAIT_SECONDS}s"
   local poll_interval=5
   local max_poll=$(( (TASK_WAIT_SECONDS + poll_interval - 1) / poll_interval ))
   local poll_count=0
@@ -106,18 +111,25 @@ poll_task_result() {
       && [ "$task_status" != "cancelled" ]; do
     sleep "$poll_interval"
     poll_count=$((poll_count + 1))
+    # Log a checkpoint every 10 polls (every 50s) to avoid log spam but still have breadcrumbs
+    if [ $((poll_count % 10)) -eq 0 ] || [ "$task_status" = "completed" ] || [ "$task_status" = "failed" ]; then
+      checkpoint "server: poll ${poll_count}/${max_poll} — status=${task_status}"
+    else
+      echo "  Poll ${poll_count}/${max_poll}: status=${task_status}" | tee -a "${CODETETHER_LOG_FILE}"
+    fi
+    checkpoint "server: BEFORE curl GET task status"
     task_response=$(curl -fsSL \
       -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
       "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}" 2>/dev/null || echo '{}')
     task_status=$(echo "$task_response" | jq -r '.status // "unknown"')
     TASK_STATUS="$task_status"
-    echo "  Poll ${poll_count}/${max_poll}: status=${task_status}" | tee -a "${CODETETHER_LOG_FILE}"
   done
 
   # Export for callers that need the final status
   TASK_STATUS="$task_status"
 
   if [ "$task_status" = "completed" ]; then
+    checkpoint "server: Task completed — fetching result"
     local result_response
     result_response=$(curl -fsSL \
       -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
