@@ -46,8 +46,11 @@ parse_comment_context() {
 }
 
 # ── Handle issues (not PR comments) ──────────────────────────────
+# FAILS CLOSED: exits non-zero if the server task fails.
+# Posts status comments at each stage so the user has visibility.
 handle_issue() {
   echo "::group::Processing issue #${PR_NUMBER}"
+  log_info "Processing issue #${PR_NUMBER}: ${PR_TITLE}"
 
   local comment_instructions=""
   if [ "${GITHUB_EVENT_NAME:-}" = "issue_comment" ] && [ -n "${COMMENT_BODY}" ]; then
@@ -68,16 +71,59 @@ ${comment_instructions}
 Issue body:
 ${PR_BODY:-No description provided.}"
 
-  local review_text=""
+  # ── Post "picked up" status comment ────────────────────────────
+  if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
+    post_github_comment "${PR_NUMBER}" "## 🔵 CodeTether Picked Up
 
-  if [ "$INPUT_MODE" = "server" ]; then
-    dispatch_server_task "${prompt}" "Issue #${PR_NUMBER}: ${PR_TITLE}"
-    poll_task_result
-    review_text="$REVIEW_TEXT"
+Analyzing issue #${PR_NUMBER}... Will post results when complete."
   fi
 
-  if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "$review_text" ]; then
-    local comment="## 🤖 CodeTether Response
+  local review_text=""
+  local task_failed="false"
+
+  if [ "$INPUT_MODE" = "server" ]; then
+    log_info "Dispatching issue task to server"
+    if ! dispatch_server_task "${prompt}" "Issue #${PR_NUMBER}: ${PR_TITLE}"; then
+      task_failed="true"
+      review_text="$REVIEW_TEXT"
+      log_error "Server dispatch failed for issue #${PR_NUMBER}"
+    elif ! poll_task_result; then
+      task_failed="true"
+      review_text="$REVIEW_TEXT"
+      log_error "Server task failed for issue #${PR_NUMBER} (task ${TASK_ID})"
+    else
+      review_text="$REVIEW_TEXT"
+    fi
+  else
+    local review_file
+    review_file="$(mktemp)"
+    run_local_codetether "$prompt" "$review_file"
+    local ec=$?
+    if [ "$ec" -ne 0 ]; then
+      task_failed="true"
+      review_text=$(head -c 65000 "$review_file")
+      log_error "codetether failed for issue #${PR_NUMBER} (exit ${ec})"
+    else
+      review_text=$(head -c 65000 "$review_file")
+    fi
+    rm -f "$review_file"
+  fi
+
+  # ── Post result comment ────────────────────────────────────────
+  if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
+    if [ "$task_failed" = "true" ]; then
+      local fail_comment="## ❌ CodeTether Failed
+
+Issue #${PR_NUMBER}: ${PR_TITLE}
+
+Task: \`${TASK_ID:-local}\`
+
+**Error**: ${review_text}
+
+See the [workflow run](${GITHUB_SERVER_URL:-https://github.com}/${REPO_FULL_NAME}/actions/runs/${GITHUB_RUN_ID:-?}) for details."
+      post_github_comment "${PR_NUMBER}" "$(truncate_str "$fail_comment" 65000)"
+    elif [ -n "$review_text" ]; then
+      local comment="## 🤖 CodeTether Response
 
 <details><summary>Issue #${PR_NUMBER}: ${PR_TITLE}</summary>
 
@@ -86,13 +132,28 @@ Task: \`${TASK_ID:-local}\`
 </details>
 
 ${review_text}"
-    comment="$(truncate_str "$comment" 65000)"
-    post_github_comment "${PR_NUMBER}" "${comment}"
-    echo "Response posted to Issue #${PR_NUMBER}"
+      comment="$(truncate_str "$comment" 65000)"
+      post_github_comment "${PR_NUMBER}" "${comment}"
+      log_info "Response posted to Issue #${PR_NUMBER}"
+    fi
   fi
 
-  write_review_output "$review_text"
+  write_review_output "${review_text:-}" "$( [ "$task_failed" = "true" ] && echo 1 || echo 0 )"
+  [ -n "${TASK_ID:-}" ] && echo "task_id=${TASK_ID}" >> "$GITHUB_OUTPUT"
   echo "::endgroup::"
+
+  # ── FAIL CLOSED ────────────────────────────────────────────────
+  if [ "$task_failed" = "true" ]; then
+    if [ "${INPUT_FAIL_ON_ERROR:-true}" = "true" ]; then
+      finalize_run 1 "Issue #${PR_NUMBER} processing failed"
+      exit 1
+    else
+      log_warn "Issue #${PR_NUMBER} failed but fail_on_error=false — continuing"
+      finalize_run 0 "Issue #${PR_NUMBER} processing failed (best-effort mode)"
+      exit 0
+    fi
+  fi
+  finalize_run 0 "Issue #${PR_NUMBER} processed successfully"
   exit 0
 }
 
@@ -100,7 +161,6 @@ ${review_text}"
 handle_pr_comment() {
   fetch_pr_metadata
 
-  # Non-fix PR comment: append context to extra prompt then fall through to review
   if [ -n "${COMMENT_BODY}" ] && [ "${FIX_REQUEST}" != "true" ]; then
     INPUT_EXTRA_PROMPT="$(printf '%s\n\nRespond to this PR comment while reviewing the current diff:\n%s' "${INPUT_EXTRA_PROMPT:-}" "${COMMENT_BODY}")"
     [ -n "${COMMENT_PATH}" ] && INPUT_EXTRA_PROMPT="$(printf '%s\n\nThe comment targets file: %s' "${INPUT_EXTRA_PROMPT}" "${COMMENT_PATH}")"
@@ -113,21 +173,47 @@ handle_pr_comment() {
 }
 
 # ── Server-mode review ───────────────────────────────────────────
+# FAILS CLOSED: exits non-zero if the server task fails.
 run_server_review() {
   echo "::group::Dispatching review task to A2A server"
   local idempotency_key="pr-review-${REPO_FULL_NAME//\//-}-${PR_NUMBER}-${GITHUB_SHA:0:8}"
-  dispatch_server_task "${PROMPT}" "PR Review: #${PR_NUMBER} ${PR_TITLE}" "$idempotency_key"
-  poll_task_result
+
+  if ! dispatch_server_task "${PROMPT}" "PR Review: #${PR_NUMBER} ${PR_TITLE}" "$idempotency_key"; then
+    local fail_msg="Server dispatch failed for PR #${PR_NUMBER}."
+    if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
+      post_github_comment "${PR_NUMBER}" "## ❌ CodeTether Review Failed
+
+${fail_msg} See workflow logs."
+    fi
+    write_review_output "${fail_msg}" "1"
+    finalize_run 1 "Server dispatch failed"
+    echo "::endgroup::"
+    exit 1
+  fi
+
+  if ! poll_task_result; then
+    # poll_task_result returns 1 on failure/timeout/canceled
+    local fail_msg="${REVIEW_TEXT}"
+    if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
+      post_github_comment "${PR_NUMBER}" "## ❌ CodeTether Review Failed
+
+${fail_msg}"
+    fi
+    write_review_output "${fail_msg}" "1"
+    finalize_run 1 "Server task failed: ${TASK_STATUS}"
+    echo "::endgroup::"
+    exit 1
+  fi
 
   echo "exit_code=0" >> "$GITHUB_OUTPUT"
+  [ -n "${TASK_ID:-}" ] && echo "task_id=${TASK_ID}" >> "$GITHUB_OUTPUT"
   {
     echo "review<<CODETETHER_EOF"
     echo "$REVIEW_TEXT"
     echo "CODETETHER_EOF"
   } >> "$GITHUB_OUTPUT"
 
-  if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ] \
-      && [ "${TASK_STATUS:-}" = "completed" ]; then
+  if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
     local preset_label
     preset_label="$(preset_label)"
     local comment="## 🔍 CodeTether Review (${preset_label})
@@ -141,10 +227,11 @@ Mode: server · Task: \`${TASK_ID}\`
 ${REVIEW_TEXT}"
     comment="$(truncate_str "$comment" 65000)"
     post_github_comment "${PR_NUMBER}" "${comment}"
-    echo "Review posted to PR #${PR_NUMBER}"
+    log_info "Review posted to PR #${PR_NUMBER}"
   fi
 
   echo "::endgroup::"
+  finalize_run 0 "Server review completed successfully"
   exit 0
 }
 
@@ -169,6 +256,7 @@ if [ -z "$PROMPT" ]; then
   echo "No code changes detected — skipping review."
   echo "review=No code changes to review." >> "$GITHUB_OUTPUT"
   echo "exit_code=0" >> "$GITHUB_OUTPUT"
+  finalize_run 0 "No code changes to review"
   exit 0
 fi
 

@@ -76,6 +76,13 @@ inputs:
     description: "Checked-out repository path to review or edit"
     required: false
     default: ""
+  fail_on_error:
+    description: >-
+      When true, the action fails the workflow step if codetether exits
+      non-zero or the server task fails/times out (default: true).
+      Set to false for best-effort mode (warns but doesn't fail the step).
+    required: false
+    default: "true"
 
 outputs:
   review:
@@ -84,6 +91,9 @@ outputs:
   exit_code:
     description: "Agent exit code (0 = success)"
     value: ${{ steps.review.outputs.exit_code }}
+  task_id:
+    description: "Server task ID (empty in local mode)"
+    value: ${{ steps.review.outputs.task_id }}
 
 runs:
   using: "composite"
@@ -146,7 +156,10 @@ runs:
         INPUT_AGENT_TYPE: ${{ inputs.agent_type }}
         INPUT_PRESET: ${{ inputs.preset }}
         INPUT_WORKSPACE_PATH: ${{ inputs.workspace_path }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
         GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
         PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         PR_TITLE: ${{ github.event.pull_request.title || github.event.issue.title }}
         PR_BODY: ${{ github.event.pull_request.body || github.event.issue.body }}
@@ -154,3 +167,12 @@ runs:
         PR_HEAD: ${{ github.event.pull_request.head.ref || '' }}
         REPO_FULL_NAME: ${{ github.repository }}
       run: ${{ github.action_path }}/action/entrypoint.sh
+
+    - name: Upload action logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: codetether-logs
+        path: ${{ inputs.workspace_path || github.workspace }}/.codetether-logs/
+        retention-days: 14
+        if-no-files-found: ignore
