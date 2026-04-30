@@ -67,7 +67,11 @@ inputs:
   task_wait_seconds:
     description: "How long to wait for server-dispatched tasks before timing out"
     required: false
-    default: "1200"
+    default: "1800"
+  timeout_minutes:
+    description: "GitHub Actions job-level timeout in minutes (set this in your workflow's timeout-minutes, not here)"
+    required: false
+    default: "30"
   version:
     description: "CodeTether version to install (local mode only)"
     required: false
