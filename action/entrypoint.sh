@@ -16,6 +16,10 @@ source "${SCRIPT_DIR}/lib/server.sh"
 source "${SCRIPT_DIR}/lib/local.sh"
 # shellcheck source=lib/presets.sh
 source "${SCRIPT_DIR}/lib/presets.sh"
+# shellcheck source=lib/issue.sh
+source "${SCRIPT_DIR}/lib/issue.sh"
+
+checkpoint "entrypoint: STARTUP — event=${GITHUB_EVENT_NAME:-?} mode=${INPUT_MODE} repo=${REPO_FULL_NAME:-?}"
 
 # ── Parse comment context from event payload ─────────────────────
 parse_comment_context() {
@@ -50,6 +54,7 @@ parse_comment_context() {
 # Posts status comments at each stage so the user has visibility.
 handle_issue() {
   echo "::group::Processing issue #${PR_NUMBER}"
+  checkpoint "handle_issue: ENTER — issue #${PR_NUMBER}: ${PR_TITLE}"
   log_info "Processing issue #${PR_NUMBER}: ${PR_TITLE}"
 
   local comment_instructions=""
@@ -72,44 +77,44 @@ Issue body:
 ${PR_BODY:-No description provided.}"
 
   # ── Post "picked up" status comment ────────────────────────────
+  checkpoint "handle_issue: BEFORE posting 'picked up' comment"
   if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
     post_github_comment "${PR_NUMBER}" "## 🔵 CodeTether Picked Up
 
 Analyzing issue #${PR_NUMBER}... Will post results when complete."
+    checkpoint "handle_issue: AFTER posting 'picked up' comment"
   fi
 
   local review_text=""
   local task_failed="false"
 
   if [ "$INPUT_MODE" = "server" ]; then
+    # ── SERVER MODE: analyze and respond ─────────────────────────
+    checkpoint "handle_issue: BEFORE dispatch_server_task (server mode)"
     log_info "Dispatching issue task to server"
     if ! dispatch_server_task "${prompt}" "Issue #${PR_NUMBER}: ${PR_TITLE}"; then
       task_failed="true"
       review_text="$REVIEW_TEXT"
+      checkpoint "handle_issue: dispatch_server_task FAILED"
       log_error "Server dispatch failed for issue #${PR_NUMBER}"
     elif ! poll_task_result; then
       task_failed="true"
       review_text="$REVIEW_TEXT"
+      checkpoint "handle_issue: poll_task_result FAILED (task ${TASK_ID})"
       log_error "Server task failed for issue #${PR_NUMBER} (task ${TASK_ID})"
     else
       review_text="$REVIEW_TEXT"
+      checkpoint "handle_issue: Server task completed successfully (task ${TASK_ID})"
     fi
   else
-    local review_file
-    review_file="$(mktemp)"
-    run_local_codetether "$prompt" "$review_file"
-    local ec=$?
-    if [ "$ec" -ne 0 ]; then
-      task_failed="true"
-      review_text=$(head -c 65000 "$review_file")
-      log_error "codetether failed for issue #${PR_NUMBER} (exit ${ec})"
-    else
-      review_text=$(head -c 65000 "$review_file")
-    fi
-    rm -f "$review_file"
+    # ── LOCAL MODE: delegate to full branch→commit→push→PR flow ──
+    checkpoint "handle_issue: Delegating to handle_issue_local (local mode)"
+    handle_issue_local "$prompt"
+    return $?
   fi
 
   # ── Post result comment ────────────────────────────────────────
+  checkpoint "handle_issue: BEFORE posting result comment"
   if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
     if [ "$task_failed" = "true" ]; then
       local fail_comment="## ❌ CodeTether Failed
@@ -137,6 +142,7 @@ ${review_text}"
       log_info "Response posted to Issue #${PR_NUMBER}"
     fi
   fi
+  checkpoint "handle_issue: AFTER posting result comment"
 
   write_review_output "${review_text:-}" "$( [ "$task_failed" = "true" ] && echo 1 || echo 0 )"
   [ -n "${TASK_ID:-}" ] && echo "task_id=${TASK_ID}" >> "$GITHUB_OUTPUT"
@@ -159,7 +165,9 @@ ${review_text}"
 
 # ── Handle PR comment with fix request ───────────────────────────
 handle_pr_comment() {
+  checkpoint "handle_pr_comment: ENTER"
   fetch_pr_metadata
+  checkpoint "handle_pr_comment: PR metadata fetched — base=${PR_BASE} head=${PR_HEAD}"
 
   if [ -n "${COMMENT_BODY}" ] && [ "${FIX_REQUEST}" != "true" ]; then
     INPUT_EXTRA_PROMPT="$(printf '%s\n\nRespond to this PR comment while reviewing the current diff:\n%s' "${INPUT_EXTRA_PROMPT:-}" "${COMMENT_BODY}")"
@@ -168,16 +176,20 @@ handle_pr_comment() {
   fi
 
   if [ "${FIX_REQUEST}" = "true" ]; then
+    checkpoint "handle_pr_comment: FIX_REQUEST=true — calling apply_fix"
     apply_fix "$COMMENT_BODY" "$COMMENT_PATH" "$COMMENT_DIFF_HUNK"
   fi
+  checkpoint "handle_pr_comment: EXIT"
 }
 
 # ── Server-mode review ───────────────────────────────────────────
 # FAILS CLOSED: exits non-zero if the server task fails.
 run_server_review() {
   echo "::group::Dispatching review task to A2A server"
+  checkpoint "run_server_review: ENTER — PR #${PR_NUMBER}"
   local idempotency_key="pr-review-${REPO_FULL_NAME//\//-}-${PR_NUMBER}-${GITHUB_SHA:0:8}"
 
+  checkpoint "run_server_review: BEFORE dispatch_server_task"
   if ! dispatch_server_task "${PROMPT}" "PR Review: #${PR_NUMBER} ${PR_TITLE}" "$idempotency_key"; then
     local fail_msg="Server dispatch failed for PR #${PR_NUMBER}."
     if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
@@ -185,13 +197,16 @@ run_server_review() {
 
 ${fail_msg} See workflow logs."
     fi
+    checkpoint "run_server_review: dispatch FAILED"
     write_review_output "${fail_msg}" "1"
     finalize_run 1 "Server dispatch failed"
     echo "::endgroup::"
     exit 1
   fi
 
+  checkpoint "run_server_review: BEFORE poll_task_result (task ${TASK_ID})"
   if ! poll_task_result; then
+    checkpoint "run_server_review: poll_task_result FAILED — status=${TASK_STATUS}"
     # poll_task_result returns 1 on failure/timeout/canceled
     local fail_msg="${REVIEW_TEXT}"
     if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
@@ -205,6 +220,7 @@ ${fail_msg}"
     exit 1
   fi
 
+  checkpoint "run_server_review: poll succeeded"
   echo "exit_code=0" >> "$GITHUB_OUTPUT"
   [ -n "${TASK_ID:-}" ] && echo "task_id=${TASK_ID}" >> "$GITHUB_OUTPUT"
   {
@@ -236,23 +252,29 @@ ${REVIEW_TEXT}"
 }
 
 # ── Main ──────────────────────────────────────────────────────────
+checkpoint "main: Parsing comment context"
 parse_comment_context
+checkpoint "main: Changing to workspace ${WORKSPACE_PATH}"
 cd "${WORKSPACE_PATH}"
 
 # Issue mode
 if [ "${GITHUB_EVENT_NAME:-}" = "issues" ] \
     || { [ "${GITHUB_EVENT_NAME:-}" = "issue_comment" ] && [ "${IS_PR_COMMENT}" != "true" ]; }; then
+  checkpoint "main: Routing to handle_issue"
   handle_issue
 fi
 
 # PR comment mode (may set FIX_REQUEST=true)
 if [ "${IS_PR_COMMENT}" = "true" ]; then
+  checkpoint "main: Routing to handle_pr_comment"
   handle_pr_comment
 fi
 
 # Standard PR review
+checkpoint "main: Building review prompt"
 build_review_prompt
 if [ -z "$PROMPT" ]; then
+  checkpoint "main: No code changes — skipping review"
   echo "No code changes detected — skipping review."
   echo "review=No code changes to review." >> "$GITHUB_OUTPUT"
   echo "exit_code=0" >> "$GITHUB_OUTPUT"
@@ -261,7 +283,9 @@ if [ -z "$PROMPT" ]; then
 fi
 
 if [ "$INPUT_MODE" = "server" ]; then
+  checkpoint "main: Routing to run_server_review"
   run_server_review
 else
+  checkpoint "main: Routing to run_local_review"
   run_local_review
 fi

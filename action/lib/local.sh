@@ -7,6 +7,7 @@
 run_local_codetether() {
   local prompt="$1"
   local output_file="$2"
+  checkpoint "local: BEFORE run_local_codetether (prompt $(echo "$prompt" | wc -c) bytes)"
   local run_args=()
   if codetether run --help 2>&1 | grep -q -- '--max-steps'; then
     run_args+=(--max-steps "${INPUT_MAX_STEPS}")
@@ -14,8 +15,10 @@ run_local_codetether() {
 
   save_artifact "prompt.txt" "$prompt"
   log_info "Running codetether locally (prompt $(echo "$prompt" | wc -c) bytes)"
+  checkpoint "local: codetether run starting"
   codetether run "${run_args[@]}" "$prompt" 2>&1 | tee "$output_file"
   local ec="${PIPESTATUS[0]:-0}"
+  checkpoint "local: codetether run finished — exit_code=${ec}"
   log_info "codetether exited with code ${ec}"
   [ -f "$output_file" ] && cp "$output_file" "${CODETETHER_ARTIFACT_DIR}/codetether-output.txt"
   return "$ec"
@@ -24,13 +27,14 @@ run_local_codetether() {
 # ── Gather PR diff, truncated to MAX_DIFF_LINES ──────────────────
 gather_diff() {
   echo "::group::Fetching PR diff"
+  checkpoint "local: BEFORE gather_diff"
   DIFF_FILE="$(mktemp)"
   git diff "origin/${PR_BASE}...HEAD" \
     -- '*.rs' '*.py' '*.ts' '*.js' '*.go' '*.java' '*.tsx' '*.jsx' '*.yml' '*.yaml' '*.toml' \
     > "$DIFF_FILE" 2>/dev/null || true
 
   DIFF_LINES=$(wc -l < "$DIFF_FILE")
-  log_info "Diff: ${DIFF_LINES} lines"
+  checkpoint "local: Diff gathered — ${DIFF_LINES} lines"
 
   local max_diff_lines=3000
   if [ "$DIFF_LINES" -gt "$max_diff_lines" ]; then
@@ -65,11 +69,13 @@ $(cat "$DIFF_FILE")
 # FAILS CLOSED: exits non-zero if codetether fails.
 run_local_review() {
   echo "::group::Running CodeTether review"
+  checkpoint "local: BEFORE run_local_review"
   local review_file
   review_file="$(mktemp)"
 
   run_local_codetether "$PROMPT" "$review_file"
   local exit_code=$?
+  checkpoint "local: AFTER run_local_codetether — exit_code=${exit_code}"
   echo "::endgroup::"
 
   local review_text
@@ -78,6 +84,7 @@ run_local_review() {
 
   # ── FAIL CLOSED: if codetether failed, report and exit non-zero ──
   if [ "$exit_code" -ne 0 ]; then
+    checkpoint "local: codetether FAILED — exit_code=${exit_code}"
     log_error "codetether exited with code ${exit_code} — failing the action"
     if [ "${INPUT_AUTO_COMMENT}" = "true" ] && [ -n "${PR_NUMBER:-}" ]; then
       local workflow_url="${GITHUB_SERVER_URL:-https://github.com}/${REPO_FULL_NAME}/actions/runs/${GITHUB_RUN_ID:-?}"
@@ -121,6 +128,7 @@ apply_fix() {
   local comment_diff_hunk="${3:-}"
 
   echo "::group::Applying requested PR fix"
+  checkpoint "local: BEFORE apply_fix"
 
   if [ "${INPUT_MODE}" != "local" ]; then
     local msg="Auto-fix requests require local mode with repository write access."
@@ -146,6 +154,7 @@ ${msg}"
 
   git fetch origin "${PR_HEAD}" --depth=1 || true
   git checkout -B "${PR_HEAD}" "origin/${PR_HEAD}" 2>/dev/null || git checkout -B "${PR_HEAD}"
+  checkpoint "local: Checked out PR head branch ${PR_HEAD}"
 
   local diff_file
   diff_file="$(mktemp)"
@@ -181,6 +190,7 @@ After editing files, run the smallest relevant validation needed to support the 
 
   run_local_codetether "${fix_prompt}" "${fix_file}"
   local ec=$?
+  checkpoint "local: apply_fix codetether exit_code=${ec}"
   if [ "$ec" -ne 0 ]; then
     local msg="I couldn't apply the requested changes automatically. Review the workflow logs for details."
     [ "${INPUT_AUTO_COMMENT}" = "true" ] && post_github_comment "${PR_NUMBER}" "## 🛠️ CodeTether Fix
@@ -207,17 +217,21 @@ ${msg}"
 
   # ── Commit and push with VERIFICATION ──────────────────────────
   git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO_FULL_NAME}.git"
+  checkpoint "local: BEFORE git add"
   git add -A
+  checkpoint "local: AFTER git add — $(git diff --cached --stat | tail -1)"
   local commit_sha
+  checkpoint "local: BEFORE git commit (fix for PR #${PR_NUMBER})"
   GIT_AUTHOR_NAME="codetether[bot]" \
   GIT_AUTHOR_EMAIL="codetether[bot]@users.noreply.github.com" \
   GIT_COMMITTER_NAME="codetether[bot]" \
   GIT_COMMITTER_EMAIL="codetether[bot]@users.noreply.github.com" \
     git commit -m "fix: address @codetether request on PR #${PR_NUMBER}"
   commit_sha="$(git rev-parse HEAD)"
-  log_info "Committed ${commit_sha:0:8}"
+  checkpoint "local: AFTER git commit — sha=${commit_sha:0:8}"
 
   # Use verified push — will fail the action if push doesn't stick
+  checkpoint "local: BEFORE verified_git_push (${PR_HEAD})"
   if ! verified_git_push "${PR_HEAD}"; then
     local msg="Failed to push commit \`${commit_sha:0:8}\` to \`${PR_HEAD}\`. The push was rejected or did not persist on the remote."
     [ "${INPUT_AUTO_COMMENT}" = "true" ] && post_github_comment "${PR_NUMBER}" "## ❌ CodeTether Fix Push Failed
