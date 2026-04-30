@@ -7,6 +7,7 @@
 post_github_comment() {
   local target_number="$1"
   local body="$2"
+  checkpoint "github: BEFORE post_github_comment #${target_number}"
   local resp
   resp=$(curl -sS -o /dev/null -w "%{http_code}" \
     -X POST \
@@ -48,8 +49,10 @@ github_api_post() {
   local path="$1"
   local payload="$2"
   local desc="${3:-GitHub API call}"
-  local http_code
-  http_code=$(curl -sS -o /tmp/codetether-gh-response.json -w "%{http_code}" \
+  checkpoint "github: BEFORE api_post ${desc} ${path}"
+  local http_code tmp_resp
+  tmp_resp=$(mktemp)
+  http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
     -X POST \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
@@ -57,10 +60,12 @@ github_api_post() {
     -d "$payload" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$http_code" ] && http_code="000"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-    log_error "${desc} failed (HTTP ${http_code}): $(cat /tmp/codetether-gh-response.json 2>/dev/null || echo 'no response body')"
+    log_error "${desc} failed (HTTP ${http_code}): $(cat "$tmp_resp" 2>/dev/null || echo 'no response body')"
+    rm -f "$tmp_resp"
     return 1
   fi
-  cat /tmp/codetether-gh-response.json
+  cat "$tmp_resp"
+  rm -f "$tmp_resp"
 }
 
 # ── Fetch PR metadata (base, head, head repo) ───────────────────
@@ -76,11 +81,13 @@ fetch_pr_metadata() {
 # Returns 0 if the branch exists, 1 otherwise.
 verify_branch_pushed() {
   local branch="$1"
+  local encoded_branch
+  encoded_branch=$(jq -rn --arg v "$branch" '$v|@uri')
   local ref_response
   ref_response=$(curl -sS -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${branch}" 2>> "${CODETETHER_LOG_FILE}") || :
+    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${encoded_branch}" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$ref_response" ] && ref_response="000"
   if [ "$ref_response" -ge 200 ] && [ "$ref_response" -lt 300 ]; then
     log_info "Branch '${branch}' verified on remote (HTTP ${ref_response})"
@@ -96,10 +103,12 @@ verify_branch_pushed() {
 verify_commit_on_branch() {
   local branch="$1"
   local expected_sha="$2"
+  local encoded_branch
+  encoded_branch=$(jq -nr --arg v "$branch" '$v|@uri' 2>/dev/null) || encoded_branch="$branch"
   local response
-  response=$(github_api_get "/repos/${REPO_FULL_NAME}/branches/${branch}" 2>/dev/null) || true
+  response=$(github_api_get "/repos/${REPO_FULL_NAME}/branches/${encoded_branch}" 2>/dev/null) || true
   local actual_sha
-  actual_sha=$(echo "$response" | jq -r '.commit.sha // empty' 2>/dev/null) || true
+  actual_sha=$(echo "${response:-{}}" | jq -r '.commit.sha // empty' 2>/dev/null) || true
   if [ "$actual_sha" = "$expected_sha" ]; then
     log_info "Commit ${expected_sha:0:8} verified on branch '${branch}'"
     return 0
@@ -119,6 +128,8 @@ create_pull_request() {
   local pr_url=""
   local max_retries=3
   local attempt=1
+
+  checkpoint "github: BEFORE create_pull_request — ${head_branch} → ${base_branch}: '${title}'"
 
   while [ "$attempt" -le "$max_retries" ]; do
     log_info "Creating PR: '${title}' (${head_branch} → ${base_branch}), attempt ${attempt}/${max_retries}"
@@ -172,9 +183,12 @@ verified_git_push() {
   local branch="$1"
   local remote="${2:-origin}"
 
+  checkpoint "github: BEFORE verified_git_push — ${remote}:${branch}"
   log_info "Pushing to ${remote}:${branch}..."
   git push "${remote}" "HEAD:${branch}" 2>&1 | tee -a "${CODETETHER_LOG_FILE}"
   local push_exit=${PIPESTATUS[0]:-0}
+
+  checkpoint "github: git push exit_code=${push_exit}"
 
   if [ "$push_exit" -ne 0 ]; then
     log_error "git push failed with exit code ${push_exit}"
@@ -185,9 +199,12 @@ verified_git_push() {
   sleep 2
   local sha
   sha=$(git rev-parse HEAD)
+  checkpoint "github: BEFORE verify_commit_on_branch — ${sha:0:8} on ${branch}"
   if verify_commit_on_branch "$branch" "$sha"; then
+    checkpoint "github: Push VERIFIED — ${sha:0:8} on ${branch}"
     return 0
   else
+    checkpoint "github: Push VERIFICATION FAILED — ${sha:0:8} NOT on ${branch}"
     log_error "Push verification failed: commit ${sha:0:8} not found on remote branch ${branch}"
     return 1
   fi

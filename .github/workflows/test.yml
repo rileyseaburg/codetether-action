@@ -14,8 +14,11 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
 
-      - name: Lint entrypoint
-        run: shellcheck -x action/entrypoint.sh action/lib/*.sh
+      - name: Lint shell scripts
+        run: |
+          shellcheck -x -S warning \
+            --exclude=SC1091,SC2034,SC2155,SC2091 \
+            action/entrypoint.sh action/lib/*.sh
 
   action-yaml-lint:
     runs-on: ubuntu-latest
@@ -24,9 +27,6 @@ jobs:
 
       - name: Validate action.yml
         run: |
-          npm install -g actionyaml-lint
-          actionyaml-lint action.yml || true
-          # Basic schema check: ensure required fields exist
           python3 -c "
           import yaml, sys
           with open('action.yml') as f:

@@ -39,12 +39,88 @@ mkdir -p "${CODETETHER_ARTIFACT_DIR}"
 # Touch the log file so it always exists
 : > "${CODETETHER_LOG_FILE}"
 
+# ── Action start time for elapsed-time tracking ─────────────────
+# Capture once at source time so all checkpoints share the same epoch.
+CODETETHER_START_EPOCH="${CODETETHER_START_EPOCH:-$(date +%s)}"
+# Default budget in seconds (GitHub Actions job timeout, configurable)
+# INPUT_TIMEOUT_MINUTES defaults to 30 via action.yml; guard for non-Actions contexts.
+INPUT_TIMEOUT_MINUTES="${INPUT_TIMEOUT_MINUTES:-30}"
+CODETETHER_TIME_BUDGET="${CODETETHER_TIME_BUDGET:-$(( INPUT_TIMEOUT_MINUTES * 60 ))}"
+
 # ── Structured logging ──────────────────────────────────────────
 # log_info, log_warn, log_error: append to the persistent log AND
 # echo to the GitHub Actions console.
-log_info()  { local msg="[$(date -Iseconds)] INFO: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}"; }
+github_actions_escape() {
+  local msg="$1"
+  msg="${msg//'%'/'%25'}"
+  msg="${msg//$'\r'/'%0D'}"
+  msg="${msg//$'\n'/'%0A'}"
+  printf '%s' "$msg"
+}
+
+log_info()  { local msg="[$(date -Iseconds)] INFO: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2; }
 log_warn()  { local msg="[$(date -Iseconds)] WARN: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2; }
-log_error() { local msg="[$(date -Iseconds)] ERROR: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2; echo "::error::$*"; }
+log_error() {
+  local raw_msg="$*"
+  local msg="[$(date -Iseconds)] ERROR: $raw_msg"
+  echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2
+  echo "::error::$(github_actions_escape "$raw_msg")"
+}
+
+# ── Debug checkpoint with elapsed time and remaining budget ─────
+# Usage: checkpoint "Description of what just happened or is about to happen"
+# Prints timestamp, elapsed seconds, and remaining time budget.
+# If remaining budget is low (< 60s), also emits a warning.
+checkpoint() {
+  local label="$1"
+  local now
+  now=$(date +%s)
+  local elapsed=$(( now - CODETETHER_START_EPOCH ))
+  local remaining=$(( CODETETHER_TIME_BUDGET - elapsed ))
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local budget_str="${remaining}s remaining"
+  if [ "$remaining" -lt 0 ]; then
+    budget_str="OVER BUDGET by $(( -remaining ))s"
+  fi
+
+  local msg="[$(date -Iseconds)] CHECKPOINT: ${label} | elapsed=${elapsed}s | budget=${budget_str}"
+  echo "$msg" | tee -a "${CODETETHER_LOG_FILE}"
+
+  # Emit GitHub Actions debug annotation for visibility in logs
+  echo "::debug::CHECKPOINT: ${label} | elapsed=${elapsed}s | remaining=${remaining}s"
+
+  # Warn if time is running low
+  if [ "$remaining" -lt 60 ] && [ "$remaining" -gt 0 ]; then
+    log_warn "TIME BUDGET LOW: ${remaining}s remaining (of ${CODETETHER_TIME_BUDGET}s). Consider prioritizing push."
+  elif [ "$remaining" -le 0 ]; then
+    log_error "TIME BUDGET EXCEEDED! ${remaining}s remaining. Push whatever you have NOW."
+  fi
+}
+
+# ── Emergency push: force-push current state and bail ────────────
+# Call when time budget is nearly exhausted. Commits any unstaged
+# changes with a marker message, pushes, and exits.
+emergency_push_and_exit() {
+  local branch="$1"
+  local reason="${2:-time budget exhausted}"
+  log_warn "EMERGENCY PUSH: ${reason}"
+
+  # Stage any uncommitted changes
+  if [ -n "$(git status --short 2>/dev/null)" ]; then
+    git add -A 2>/dev/null || true
+    GIT_AUTHOR_NAME="codetether[bot]" \
+    GIT_AUTHOR_EMAIL="codetether[bot]@users.noreply.github.com" \
+    GIT_COMMITTER_NAME="codetether[bot]" \
+    GIT_COMMITTER_EMAIL="codetether[bot]@users.noreply.github.com" \
+      git commit -m "WIP: emergency commit — ${reason}" 2>/dev/null || true
+  fi
+
+  # Push whatever we have
+  git push origin "HEAD:${branch}" 2>&1 | tee -a "${CODETETHER_LOG_FILE}" || true
+  log_warn "Emergency push attempted for branch ${branch}"
+}
 
 # ── Utility: truncate string to N characters ─────────────────────
 truncate_str() {
@@ -73,6 +149,12 @@ save_artifact() {
 finalize_run() {
   local exit_code="${1:-0}"
   local summary_line="${2:-"Completed with exit code ${exit_code}"}"
+
+  # Final checkpoint with total elapsed time
+  local _now
+  _now=$(date +%s)
+  local _total_elapsed=$(( _now - CODETETHER_START_EPOCH ))
+  checkpoint "FINALIZE: ${summary_line} | total_elapsed=${_total_elapsed}s"
 
   # Write GitHub Actions job summary (visible in the Actions run UI)
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
