@@ -16,6 +16,8 @@ source "${SCRIPT_DIR}/lib/server.sh"
 source "${SCRIPT_DIR}/lib/local.sh"
 # shellcheck source=lib/presets.sh
 source "${SCRIPT_DIR}/lib/presets.sh"
+# shellcheck source=lib/issue.sh
+source "${SCRIPT_DIR}/lib/issue.sh"
 
 # ── Parse comment context from event payload ─────────────────────
 parse_comment_context() {
@@ -82,6 +84,7 @@ Analyzing issue #${PR_NUMBER}... Will post results when complete."
   local task_failed="false"
 
   if [ "$INPUT_MODE" = "server" ]; then
+    # ── SERVER MODE: analyze and respond ─────────────────────────
     log_info "Dispatching issue task to server"
     if ! dispatch_server_task "${prompt}" "Issue #${PR_NUMBER}: ${PR_TITLE}"; then
       task_failed="true"
@@ -95,18 +98,9 @@ Analyzing issue #${PR_NUMBER}... Will post results when complete."
       review_text="$REVIEW_TEXT"
     fi
   else
-    local review_file
-    review_file="$(mktemp)"
-    run_local_codetether "$prompt" "$review_file"
-    local ec=$?
-    if [ "$ec" -ne 0 ]; then
-      task_failed="true"
-      review_text=$(head -c 65000 "$review_file")
-      log_error "codetether failed for issue #${PR_NUMBER} (exit ${ec})"
-    else
-      review_text=$(head -c 65000 "$review_file")
-    fi
-    rm -f "$review_file"
+    # ── LOCAL MODE: delegate to full branch→commit→push→PR flow ──
+    handle_issue_local "$prompt"
+    return $?
   fi
 
   # ── Post result comment ────────────────────────────────────────
