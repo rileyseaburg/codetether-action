@@ -42,7 +42,8 @@ After editing files, run the smallest relevant validation needed to support the 
   local ec=$?
   checkpoint "handle_issue_local: AFTER run_local_codetether — exit_code=${ec}"
   local review_text
-  review_text=$(head -c 65000 "$output_file")
+  review_text=$(cat "$output_file")
+  review_text="${review_text:0:65000}"
   rm -f "$output_file"
 
   if [ "$ec" -ne 0 ]; then

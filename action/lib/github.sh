@@ -50,8 +50,9 @@ github_api_post() {
   local payload="$2"
   local desc="${3:-GitHub API call}"
   checkpoint "github: BEFORE api_post ${desc} ${path}"
-  local http_code
-  http_code=$(curl -sS -o /tmp/codetether-gh-response.json -w "%{http_code}" \
+  local http_code tmp_resp
+  tmp_resp=$(mktemp)
+  http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
     -X POST \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
@@ -59,10 +60,12 @@ github_api_post() {
     -d "$payload" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$http_code" ] && http_code="000"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-    log_error "${desc} failed (HTTP ${http_code}): $(cat /tmp/codetether-gh-response.json 2>/dev/null || echo 'no response body')"
+    log_error "${desc} failed (HTTP ${http_code}): $(cat "$tmp_resp" 2>/dev/null || echo 'no response body')"
+    rm -f "$tmp_resp"
     return 1
   fi
-  cat /tmp/codetether-gh-response.json
+  cat "$tmp_resp"
+  rm -f "$tmp_resp"
 }
 
 # ── Fetch PR metadata (base, head, head repo) ───────────────────
@@ -78,11 +81,13 @@ fetch_pr_metadata() {
 # Returns 0 if the branch exists, 1 otherwise.
 verify_branch_pushed() {
   local branch="$1"
+  local encoded_branch
+  encoded_branch=$(jq -rn --arg v "$branch" '$v|@uri')
   local ref_response
   ref_response=$(curl -sS -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${branch}" 2>> "${CODETETHER_LOG_FILE}") || :
+    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${encoded_branch}" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$ref_response" ] && ref_response="000"
   if [ "$ref_response" -ge 200 ] && [ "$ref_response" -lt 300 ]; then
     log_info "Branch '${branch}' verified on remote (HTTP ${ref_response})"
@@ -98,10 +103,12 @@ verify_branch_pushed() {
 verify_commit_on_branch() {
   local branch="$1"
   local expected_sha="$2"
+  local encoded_branch
+  encoded_branch=$(jq -nr --arg v "$branch" '$v|@uri' 2>/dev/null) || encoded_branch="$branch"
   local response
-  response=$(github_api_get "/repos/${REPO_FULL_NAME}/branches/${branch}" 2>/dev/null) || true
+  response=$(github_api_get "/repos/${REPO_FULL_NAME}/branches/${encoded_branch}" 2>/dev/null) || true
   local actual_sha
-  actual_sha=$(echo "$response" | jq -r '.commit.sha // empty' 2>/dev/null) || true
+  actual_sha=$(echo "${response:-{}}" | jq -r '.commit.sha // empty' 2>/dev/null) || true
   if [ "$actual_sha" = "$expected_sha" ]; then
     log_info "Commit ${expected_sha:0:8} verified on branch '${branch}'"
     return 0

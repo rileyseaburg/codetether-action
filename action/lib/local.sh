@@ -60,9 +60,9 @@ build_review_prompt() {
 
 ${INPUT_EXTRA_PROMPT:+Additional instructions: ${INPUT_EXTRA_PROMPT}}
 
-```diff
+\`\`\`diff
 $(cat "$DIFF_FILE")
-```"
+\`\`\`"
 }
 
 # ── Execute local review and post comment ────────────────────────
@@ -79,7 +79,8 @@ run_local_review() {
   echo "::endgroup::"
 
   local review_text
-  review_text=$(head -c 65000 "$review_file")
+  review_text=$(cat "$review_file")
+  review_text="${review_text:0:65000}"
   write_review_output "$review_text" "$exit_code"
 
   # ── FAIL CLOSED: if codetether failed, report and exit non-zero ──

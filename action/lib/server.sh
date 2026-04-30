@@ -136,7 +136,7 @@ poll_task_result() {
       "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}")
     local result_text
     result_text=$(echo "$result_response" | jq -r '.result // "No response returned."')
-    REVIEW_TEXT=$(echo "$result_text" | head -c 65000)
+    REVIEW_TEXT="${result_text:0:65000}"
     save_artifact "task-result.txt" "$REVIEW_TEXT"
     log_info "Task ${TASK_ID} completed successfully"
     return 0
@@ -157,8 +157,19 @@ poll_task_result() {
     save_artifact "task-timeout.txt" "Task ${TASK_ID} timed out with status: ${task_status}"
     return 1
   fi
+}
 
-  export TASK_STATUS
+# ── Validate/coerce a non-negative integer input ─────────────────
+normalize_non_negative_integer() {
+  local value="$1"
+  local field_name="$2"
+  local normalized
+  normalized="$(printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [[ ! "$normalized" =~ ^[0-9]+$ ]]; then
+    log_error "${field_name} must be a non-negative integer, got: ${value}"
+    return 1
+  fi
+  printf '%s\n' "$normalized"
 }
 
 # ── Build metadata JSON for task dispatch ────────────────────────
@@ -166,12 +177,15 @@ build_metadata_json() {
   local pr_number="${PR_NUMBER:-0}"
   local steps="${INPUT_MAX_STEPS:-50}"
   local timeout="${TASK_WAIT_SECONDS:-3600}"
+  local normalized_steps normalized_timeout
+  normalized_steps="$(normalize_non_negative_integer "${steps}" "max_steps")" || return 1
+  normalized_timeout="$(normalize_non_negative_integer "${timeout}" "task_timeout_seconds")" || return 1
   jq -n \
     --arg source "github-actions" \
     --arg repo "${REPO_FULL_NAME}" \
     --argjson pr_num "${pr_number:-0}" \
-    --argjson max_steps "${steps}" \
-    --argjson task_timeout_seconds "${timeout}" \
+    --argjson max_steps "${normalized_steps}" \
+    --argjson task_timeout_seconds "${normalized_timeout}" \
     '{
       source: $source,
       repo: $repo,

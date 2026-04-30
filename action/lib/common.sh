@@ -49,9 +49,22 @@ CODETETHER_TIME_BUDGET="${CODETETHER_TIME_BUDGET:-$(( INPUT_TIMEOUT_MINUTES * 60
 # ── Structured logging ──────────────────────────────────────────
 # log_info, log_warn, log_error: append to the persistent log AND
 # echo to the GitHub Actions console.
-log_info()  { local msg="[$(date -Iseconds)] INFO: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}"; }
+github_actions_escape() {
+  local msg="$1"
+  msg="${msg//'%'/'%25'}"
+  msg="${msg//$'\r'/'%0D'}"
+  msg="${msg//$'\n'/'%0A'}"
+  printf '%s' "$msg"
+}
+
+log_info()  { local msg="[$(date -Iseconds)] INFO: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2; }
 log_warn()  { local msg="[$(date -Iseconds)] WARN: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2; }
-log_error() { local msg="[$(date -Iseconds)] ERROR: $*"; echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2; echo "::error::$*"; }
+log_error() {
+  local raw_msg="$*"
+  local msg="[$(date -Iseconds)] ERROR: $raw_msg"
+  echo "$msg" | tee -a "${CODETETHER_LOG_FILE}" >&2
+  echo "::error::$(github_actions_escape "$raw_msg")"
+}
 
 # ── Debug checkpoint with elapsed time and remaining budget ─────
 # Usage: checkpoint "Description of what just happened or is about to happen"
