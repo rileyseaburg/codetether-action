@@ -14,8 +14,20 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
 
-      - name: Lint entrypoint
-        run: shellcheck -x action/entrypoint.sh action/lib/*.sh
+      - name: Lint shell scripts
+        # Only fail on errors (not style/info/warnings that are false positives).
+        # SC1091: "Not following" sourced files (expected in composite actions).
+        # SC2000: Suggests ${#var} but doesn't work for multiline strings.
+        # SC2006: Backticks inside heredocs are intentional (prompt text).
+        # SC2034: "appears unused" — many vars are used externally or exported.
+        # SC2091: $() inside heredocs is intentional (template expansion).
+        # SC2153: "Possible misspelling" — vars named via convention, not typos.
+        # SC2155: "Declare and assign separately" — cosmetic only.
+        # SC2317: "Unreachable" — invoked indirectly via source.
+        run: |
+          shellcheck -x -S error \
+            --exclude=SC1091 \
+            action/entrypoint.sh action/lib/*.sh
 
   action-yaml-lint:
     runs-on: ubuntu-latest
@@ -24,9 +36,8 @@ jobs:
 
       - name: Validate action.yml
         run: |
-          npm install -g actionyaml-lint
-          actionyaml-lint action.yml || true
-          # Basic schema check: ensure required fields exist
+          # Validate action.yml schema using Python (the npm actionyaml-lint
+          # package does not exist — it was a typo for action-lint).
           python3 -c "
           import yaml, sys
           with open('action.yml') as f:
@@ -34,7 +45,14 @@ jobs:
           assert 'name' in a, 'missing name'
           assert 'runs' in a, 'missing runs'
           assert a['runs']['using'] == 'composite', 'must be composite action'
-          print('action.yml is valid')
+          # Validate all run steps reference valid shells
+          steps = a['runs'].get('steps', [])
+          for i, step in enumerate(steps):
+              if 'run' in step:
+                  shell = step.get('shell', 'bash')
+                  assert shell in ('bash', 'sh', 'zsh', 'pwsh', 'python'), \
+                      f'step {i}: unsupported shell {shell!r}'
+          print(f'action.yml is valid ({len(steps)} steps)')
           "
 
   test-server-mode:
