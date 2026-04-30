@@ -7,6 +7,7 @@
 post_github_comment() {
   local target_number="$1"
   local body="$2"
+  checkpoint "github: BEFORE post_github_comment #${target_number}"
   local resp
   resp=$(curl -sS -o /dev/null -w "%{http_code}" \
     -X POST \
@@ -48,6 +49,7 @@ github_api_post() {
   local path="$1"
   local payload="$2"
   local desc="${3:-GitHub API call}"
+  checkpoint "github: BEFORE api_post ${desc} ${path}"
   local http_code
   http_code=$(curl -sS -o /tmp/codetether-gh-response.json -w "%{http_code}" \
     -X POST \
@@ -120,6 +122,8 @@ create_pull_request() {
   local max_retries=3
   local attempt=1
 
+  checkpoint "github: BEFORE create_pull_request — ${head_branch} → ${base_branch}: '${title}'"
+
   while [ "$attempt" -le "$max_retries" ]; do
     log_info "Creating PR: '${title}' (${head_branch} → ${base_branch}), attempt ${attempt}/${max_retries}"
     local resp
@@ -172,9 +176,12 @@ verified_git_push() {
   local branch="$1"
   local remote="${2:-origin}"
 
+  checkpoint "github: BEFORE verified_git_push — ${remote}:${branch}"
   log_info "Pushing to ${remote}:${branch}..."
   git push "${remote}" "HEAD:${branch}" 2>&1 | tee -a "${CODETETHER_LOG_FILE}"
   local push_exit=${PIPESTATUS[0]:-0}
+
+  checkpoint "github: git push exit_code=${push_exit}"
 
   if [ "$push_exit" -ne 0 ]; then
     log_error "git push failed with exit code ${push_exit}"
@@ -185,9 +192,12 @@ verified_git_push() {
   sleep 2
   local sha
   sha=$(git rev-parse HEAD)
+  checkpoint "github: BEFORE verify_commit_on_branch — ${sha:0:8} on ${branch}"
   if verify_commit_on_branch "$branch" "$sha"; then
+    checkpoint "github: Push VERIFIED — ${sha:0:8} on ${branch}"
     return 0
   else
+    checkpoint "github: Push VERIFICATION FAILED — ${sha:0:8} NOT on ${branch}"
     log_error "Push verification failed: commit ${sha:0:8} not found on remote branch ${branch}"
     return 1
   fi
