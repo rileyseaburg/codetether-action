@@ -25,24 +25,51 @@ run_local_codetether() {
 }
 
 # ── Gather PR diff, truncated to MAX_DIFF_LINES ──────────────────
+# Uses the GitHub API to fetch the diff (avoids shelling out to local
+# git/diff which can break on some runner images). Uses git diff as
+# a secondary method when the API is unavailable.
 gather_diff() {
   echo "::group::Fetching PR diff"
   checkpoint "local: BEFORE gather_diff"
   DIFF_FILE="$(mktemp)"
-  git diff "origin/${PR_BASE}...HEAD" \
-    -- '*.rs' '*.py' '*.ts' '*.js' '*.go' '*.java' '*.tsx' '*.jsx' '*.yml' '*.yaml' '*.toml' \
-    > "$DIFF_FILE" 2>/dev/null || true
 
-  DIFF_LINES=$(wc -l < "$DIFF_FILE")
+  # ── Primary: GitHub API diff (no local tooling dependency) ────────
+  local api_ok="false"
+  if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "${REPO_FULL_NAME:-}" ]; then
+    checkpoint "local: Fetching diff via GitHub API for PR #${PR_NUMBER}"
+    local api_diff
+    api_diff="$(curl -sS -f \
+      -H "Authorization: token ${GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github.v3.diff" \
+      "https://api.github.com/repos/${REPO_FULL_NAME}/pulls/${PR_NUMBER}" \
+      2>>"${CODETETHER_LOG_FILE}" || true)"
+    if [ -n "${api_diff}" ]; then
+      printf '%s' "${api_diff}" > "${DIFF_FILE}"
+      api_ok="true"
+      checkpoint "local: GitHub API diff fetched ($({ wc -l < "${DIFF_FILE}"; } 2>/dev/null || echo 0) lines)"
+    else
+      log_warn "GitHub API diff returned empty — using git diff instead"
+    fi
+  fi
+
+  # ── Secondary: local git diff ────────────────────────────────────
+  if [ "${api_ok}" != "true" ]; then
+    checkpoint "local: Using git diff origin/${PR_BASE}...HEAD"
+    git diff "origin/${PR_BASE}...HEAD" \
+      -- '*.rs' '*.py' '*.ts' '*.js' '*.go' '*.java' '*.tsx' '*.jsx' '*.yml' '*.yaml' '*.toml' \
+      > "${DIFF_FILE}" 2>/dev/null || true
+  fi
+
+  DIFF_LINES=$(wc -l < "${DIFF_FILE}")
   checkpoint "local: Diff gathered — ${DIFF_LINES} lines"
 
   local max_diff_lines=3000
-  if [ "$DIFF_LINES" -gt "$max_diff_lines" ]; then
+  if [ "${DIFF_LINES}" -gt "${max_diff_lines}" ]; then
     log_warn "Diff truncated to ${max_diff_lines} lines (was ${DIFF_LINES})"
-    head -n "$max_diff_lines" "$DIFF_FILE" > "${DIFF_FILE}.trunc"
-    mv "${DIFF_FILE}.trunc" "$DIFF_FILE"
+    head -n "${max_diff_lines}" "${DIFF_FILE}" > "${DIFF_FILE}.trunc"
+    mv "${DIFF_FILE}.trunc" "${DIFF_FILE}"
   fi
-  cp "$DIFF_FILE" "${CODETETHER_ARTIFACT_DIR}/pr-diff.patch" 2>/dev/null || true
+  cp "${DIFF_FILE}" "${CODETETHER_ARTIFACT_DIR}/pr-diff.patch" 2>/dev/null || true
   echo "::endgroup::"
 }
 # ── Build a review prompt using the active preset ────────────────
@@ -56,12 +83,21 @@ build_review_prompt() {
   preset_instructions="$(build_preset_prompt \
     "$(cat "$DIFF_FILE")" \
     "${PR_BASE}" "${PR_HEAD}" "${PR_NUMBER}" "${PR_TITLE}")"
+  # Read diff content into a variable first to avoid embedding raw
+  # diff text inside a double-quoted string with backtick characters.
+  # Some diff lines start with 'diff --git ...' which, when combined
+  # with backtick-heavy markdown fencing in the same string, can cause
+  # bash parsing edge-cases on certain runner images.
+  local diff_text
+  diff_text="$(cat "${DIFF_FILE}")"
+
   PROMPT="${preset_instructions}
 
 ${INPUT_EXTRA_PROMPT:+Additional instructions: ${INPUT_EXTRA_PROMPT}}
 
-\`\`\`diff
-$(cat "$DIFF_FILE")
+"
+  PROMPT="${PROMPT}\`\`\`diff
+${diff_text}
 \`\`\`"
 }
 
@@ -162,8 +198,10 @@ ${msg}"
   git diff "origin/${PR_BASE}...HEAD" \
     -- '*.rs' '*.py' '*.ts' '*.js' '*.go' '*.java' '*.tsx' '*.jsx' '*.yml' '*.yaml' '*.toml' \
     > "$diff_file" 2>/dev/null || true
-  local fix_diff
-  fix_diff="$(head -n 3000 "$diff_file")"
+  # Read diff into a variable to avoid parsing issues with raw diff text
+  # in double-quoted strings
+  local diff_content
+  diff_content="$(head -n 3000 "$diff_file")"
 
   local fix_prompt="You are editing the checked-out PR branch for PR #${PR_NUMBER}: \"${PR_TITLE}\" (${PR_HEAD} → ${PR_BASE}).
 
@@ -181,7 +219,7 @@ ${INPUT_EXTRA_PROMPT:+Additional instructions: ${INPUT_EXTRA_PROMPT}}
 
 Current diff:
 \`\`\`diff
-${fix_diff}
+${diff_content}
 \`\`\`
 
 After editing files, run the smallest relevant validation needed to support the change. Do not commit or push; the workflow will handle git."
