@@ -60,9 +60,9 @@ build_review_prompt() {
 
 ${INPUT_EXTRA_PROMPT:+Additional instructions: ${INPUT_EXTRA_PROMPT}}
 
-```diff
+\`\`\`diff
 $(cat "$DIFF_FILE")
-```"
+\`\`\`"
 }
 
 # ── Execute local review and post comment ────────────────────────

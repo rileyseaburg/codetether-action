@@ -43,7 +43,8 @@ mkdir -p "${CODETETHER_ARTIFACT_DIR}"
 # Capture once at source time so all checkpoints share the same epoch.
 CODETETHER_START_EPOCH="${CODETETHER_START_EPOCH:-$(date +%s)}"
 # Default budget in seconds (GitHub Actions job timeout, configurable)
-CODETETHER_TIME_BUDGET="${CODETETHER_TIME_BUDGET:-$((INPUT_TIMEOUT_MINUTES:-30) * 60))}"
+INPUT_TIMEOUT_MINUTES="${INPUT_TIMEOUT_MINUTES:-30}"
+CODETETHER_TIME_BUDGET="${CODETETHER_TIME_BUDGET:-$(( INPUT_TIMEOUT_MINUTES * 60 ))}"
 
 # ── Structured logging ──────────────────────────────────────────
 # log_info, log_warn, log_error: append to the persistent log AND
