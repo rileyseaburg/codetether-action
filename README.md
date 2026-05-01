@@ -1,161 +1,218 @@
-# CodeTether Code Review — GitHub Action
+# CodeTether GitHub Action
 
-AI-powered code review and PR fix automation. Add this action to any repo in 30 seconds.
+AI-powered code review and issue resolution. Fire-and-forget architecture with persistent workers.
+
+## How It Works
+
+CodeTether uses a **fire-and-forget** architecture:
+
+```
+GitHub Action ──POST /v1/tasks/dispatch──► A2A Server ──task queue──► Persistent Worker
+     │                                        │                          │
+     │  ← task_id                             │                          ├── Claims task
+     │  Posts notification comment             │                          ├── Clones repo
+     │  EXITS (job completes in seconds)       │                          ├── Runs agent (up to 7 days)
+     │                                         │                          ├── Pushes commits incrementally
+     │                                         │                          └── Posts progress comments
+     │                                         │
+     │  User monitors via GitHub comments ◄────┘
+```
+
+**Key point**: The GitHub Action job completes in seconds. The actual work happens on a persistent worker that runs for up to 7 days.
+
+### Execution Flow
+
+1. **Dispatch** — The action sends a task to the CodeTether server and receives a `task_id`
+2. **Notify** — It posts a comment with the task_id and tracking URL to the issue/PR
+3. **Exit** — The GitHub Action job exits immediately (no waiting, no polling)
+4. **Execute** — A persistent worker picks up the task, clones the repo, and runs the agent
+5. **Report** — Progress is posted as GitHub comments on the issue/PR as the worker works
+6. **Complete** — Final results (commits, PR, response) are posted when the task finishes
 
 ## Quick Start
 
-1. Sign up at [codetether.run](https://codetether.run)
-2. Go to **Settings → API Tokens** and create a token
-3. Add it as a repository secret: `CODETETHER_TOKEN`
-4. Create `.github/workflows/codetether-review.yml`:
-
 ```yaml
 name: CodeTether Review
-
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  issues:
+    types: [opened, edited]
   issue_comment:
     types: [created]
-  pull_request_review_comment:
-    types: [created]
-
-concurrency:
-  group: codetether-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  pull_request:
+    types: [opened, synchronize]
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: >
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' &&
-       contains(github.event.comment.body, '@codetether')) ||
-      (github.event_name == 'pull_request_review_comment' &&
-       contains(github.event.comment.body, '@codetether'))
+    timeout-minutes: 5  # Action exits in seconds, this is just a safety net
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: CodeTether Review
-        uses: rileyseaburg/codetether-action@v1
+      - uses: rileyseaburg/codetether-action@main
         with:
           token: ${{ secrets.CODETETHER_TOKEN }}
 ```
 
-That's it. Every PR gets an automated review comment.
+Get your token at [codetether.run](https://codetether.run) → Settings → API Tokens.
 
-## Features
+## Modes
 
-- **Automatic PR reviews** on every push
-- **Issue responses** — assign issues or comment `@codetether` to get AI analysis
-- **PR comment replies** — `@codetether` on a PR comment for contextual review
-- **Auto-fix** — comment `@codetether fix this` to push a commit directly to the PR branch
-- **Server mode** (default) — no API keys needed, runs on CodeTether cloud
-- **Local mode** (BYOK) — run on your own infrastructure with your own LLM keys
+### Server Mode (default)
 
-## Presets
+Dispatches tasks to CodeTether cloud. **Fire-and-forget** — the action exits immediately after dispatching.
 
-Run multiple specialized reviews on the same PR by using the `preset` input:
+- ✅ No LLM API keys needed
+- ✅ Tasks run for up to 7 days on persistent workers
+- ✅ Progress reported via GitHub comments
+- ✅ GitHub Action job completes in seconds
 
-```yaml
-jobs:
-  security:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: rileyseaburg/codetether-action@v1
-        with:
-          token: ${{ secrets.CODETETHER_TOKEN }}
-          preset: security
+### Local Mode
 
-  quality:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: rileyseaburg/codetether-action@v1
-        with:
-          token: ${{ secrets.CODETETHER_TOKEN }}
-          preset: quality
-```
+Runs the agent directly in the GitHub Actions runner. Requires your own LLM API keys.
 
-### Built-in Presets
-
-| Preset | Focus | Icon |
-|--------|-------|------|
-| `review` | General review (bugs, security, perf, style) | 🔍 |
-| `security` | OWASP Top 10, injection, auth, crypto, supply chain | 🔒 |
-| `quality` | Readability, complexity, DRY, testing, docs | ✨ |
-| `performance` | Algorithmic complexity, memory, I/O, concurrency | ⚡ |
-| `architecture` | Coupling, API design, extensibility, trade-offs | 🏗️ |
-| *(freeform text)* | Custom instructions — any string becomes the reviewer prompt | — |
-
-Each preset posts a separate comment with its own icon, so you can run them in parallel.
+- ⚠️ Limited by GitHub Actions timeout (max 72 hours)
+- ⚠️ Requires `api_key` or `vault_addr` + `vault_token`
+- ✅ Full control over the agent environment
 
 ## Inputs
 
 | Input | Description | Default |
 |-------|-------------|---------|
-| `token` | CodeTether API token (**required**) | — |
-| `server_url` | CodeTether server URL | `https://api.codetether.run` |
+| `token` | CodeTether API token (required) | — |
+| `server_url` | Server URL | `https://api.codetether.run` |
 | `mode` | `server` or `local` | `server` |
-| `preset` | Review focus: `review`, `security`, `quality`, `performance`, `architecture`, or freeform | `review` |
-| `extra_prompt` | Additional instructions for the reviewer | `""` |
-| `auto_comment` | Post review as PR comment | `true` |
-| `agent_type` | Agent type for task dispatch (overridden by preset) | `code-review` |
-| `model` | LLM model (local mode) | `glm-5.1` |
-| `max_steps` | Max agentic iterations (local mode) | `30` |
-| `task_wait_seconds` | Timeout for server tasks | `1200` |
+| `preset` | Review focus: `review`, `security`, `quality`, `performance`, `architecture`, or custom | `review` |
+| `extra_prompt` | Additional instructions for the agent | `""` |
+| `auto_comment` | Post results as comments | `true` |
+| `max_steps` | Max agentic loop iterations | `50` |
+| `task_timeout_hours` | Max worker runtime before task reaped (hours) | `168` (7 days) |
+| `fail_on_error` | Fail workflow on dispatch error | `true` |
 | `workspace_path` | Repo path to review | `""` |
 
-### Local Mode (BYOK)
+### Local Mode Inputs
 
-To run the agent on your own runner with your own LLM keys:
+| Input | Description | Default |
+|-------|-------------|---------|
+| `api_key` | LLM API key | — |
+| `model` | LLM model | `glm-5.1` |
+| `vault_addr` | Vault address | — |
+| `vault_token` | Vault token | — |
+| `version` | CodeTether binary version | `latest` |
 
-```yaml
-- uses: rileyseaburg/codetether-action@v1
-  with:
-    mode: local
-    api_key: ${{ secrets.OPENAI_API_KEY }}
-    model: gpt-4o
-    max_steps: "60"
-```
+### Deprecated Inputs
+
+| Input | Note |
+|-------|------|
+| `task_wait_seconds` | No longer used. Tasks are fire-and-forget. Kept for backward compatibility. |
+| `timeout_minutes` | Set via `timeout-minutes` in your workflow instead. |
 
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
-| `review` | Full review text |
-| `exit_code` | 0 on success, non-zero on failure |
+| `task_id` | Server task ID for tracking |
+| `review` | Dispatch confirmation (in server mode) or full review (in local mode) |
+| `exit_code` | 0 = dispatch succeeded |
 
-## Auto-Fix
+## Monitoring Task Progress
 
-Comment on a PR with `@codetether fix <description>` and the action will:
+In server mode, monitor progress via:
 
-1. Check out the PR branch
-2. Apply the requested changes
-3. Run validation
-4. Commit and push
+1. **GitHub Comments** — Progress is posted as comments on the issue/PR
+2. **Task API** — `GET https://api.codetether.run/v1/tasks/{task_id}`
+3. **Dashboard** — [codetether.run](https://codetether.run) dashboard
 
-> **Note:** Auto-fix only works in local mode and on non-forked PRs.
+## Presets
 
-## Pricing
+- **review** — General code review (bugs, security, performance, style)
+- **security** — OWASP-focused security audit
+- **quality** — Code quality, complexity, testing, documentation
+- **performance** — Algorithmic complexity, memory, I/O, concurrency
+- **architecture** — Separation of concerns, coupling, API design, extensibility
 
-- **Server mode**: Uses your [codetether.run](https://codetether.run) subscription
-- **Local mode**: Free — bring your own LLM API keys
+## Example Workflows
+
+### Issue Triage
+
+```yaml
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rileyseaburg/codetether-action@main
+        with:
+          token: ${{ secrets.CODETETHER_TOKEN }}
+          preset: quality
+```
+
+### On-Comment Fix
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rileyseaburg/codetether-action@main
+        with:
+          token: ${{ secrets.CODETETHER_TOKEN }}
+          # Comment "@codetether fix this" on an issue to trigger implementation
+```
+
+### PR Security Review
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rileyseaburg/codetether-action@main
+        with:
+          token: ${{ secrets.CODETETHER_TOKEN }}
+          preset: security
+```
+
+## Architecture: Why Fire-and-Forget?
+
+The previous architecture had the GitHub Action poll the server for task completion:
+
+```
+# OLD (broken for long tasks):
+GH Action → dispatch → poll for up to 1800s → timeout if worker dies
+```
+
+Problems:
+- GitHub Actions max timeout is 72h (configured at 45min for many orgs)
+- Knative worker timeout was 600s — hard kill by queue-proxy
+- If the worker died, all state was lost (emptyDir, no persistence)
+- No progress visibility while waiting
+
+New architecture:
+
+```
+# NEW (fire-and-forget):
+GH Action → dispatch → post task_id → EXIT (seconds)
+Persistent worker → claims task → runs for up to 7 days → posts progress
+```
+
+Benefits:
+- GitHub Action job completes in seconds, not hours
+- Persistent workers survive pod recycles (state in database)
+- Progress visible via GitHub comments
+- Tasks can run for up to 7 days (configurable via `task_timeout_hours` on server)
+- Worker pushes commits incrementally as it works
 
 ## License
 
