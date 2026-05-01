@@ -1,7 +1,8 @@
 name: "CodeTether Code Review"
 description: >-
   AI-powered code review and PR fix automation.
-  Add this action to any repo — no API keys needed.
+  Fire-and-forget architecture: dispatches tasks to persistent workers
+  that run for up to 7 days. Progress reported via GitHub comments.
   Sign up at https://codetether.run, grab your token, and go.
 author: "rileyseaburg"
 
@@ -43,7 +44,7 @@ inputs:
   # --- Advanced: self-hosted / BYOK mode ---
   mode:
     description: >-
-      "server" (default) dispatches to CodeTether cloud.
+      "server" (default) dispatches to CodeTether cloud (fire-and-forget).
       "local" runs the agent in the runner (requires your own LLM keys).
     required: false
     default: "server"
@@ -64,10 +65,10 @@ inputs:
     description: "Maximum agentic loop iterations (applies to both local and server mode)"
     required: false
     default: "50"
-  task_wait_seconds:
-    description: "How long to wait for server-dispatched tasks before timing out (seconds, default 3600 = 1 hour)"
+  task_timeout_hours:
+    description: "Maximum time the persistent worker may run before the task is reaped (hours, default 168 = 7 days)"
     required: false
-    default: "3600"
+    default: "168"
   timeout_minutes:
     description: "GitHub Actions job-level timeout in minutes (set this in your workflow's timeout-minutes, not here)"
     required: false
@@ -82,21 +83,22 @@ inputs:
     default: ""
   fail_on_error:
     description: >-
-      When true, the action fails the workflow step if codetether exits
-      non-zero or the server task fails/times out (default: true).
-      Set to false for best-effort mode (warns but doesn't fail the step).
+      When true, the action fails the workflow step if the dispatch
+      itself fails (default: true). Note: since tasks are fire-and-forget,
+      this only covers dispatch failures, not task execution failures.
+      Task execution failures are reported via GitHub comments.
     required: false
     default: "true"
 
 outputs:
   review:
-    description: "The full review text output"
+    description: "The full review text output (in server mode: dispatch confirmation with task_id)"
     value: ${{ steps.review.outputs.review }}
   exit_code:
-    description: "Agent exit code (0 = success)"
+    description: "Action exit code (0 = dispatch succeeded)"
     value: ${{ steps.review.outputs.exit_code }}
   task_id:
-    description: "Server task ID (empty in local mode)"
+    description: "Server task ID — use to track progress via the A2A API"
     value: ${{ steps.review.outputs.task_id }}
 
 runs:
@@ -154,7 +156,7 @@ runs:
         CODETETHER_DEFAULT_MODEL: ${{ inputs.model }}
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_MAX_STEPS: ${{ inputs.max_steps }}
-        INPUT_TASK_WAIT_SECONDS: ${{ inputs.task_wait_seconds }}
+        INPUT_TASK_TIMEOUT_HOURS: ${{ inputs.task_timeout_hours }}
         INPUT_EXTRA_PROMPT: ${{ inputs.extra_prompt }}
         INPUT_AUTO_COMMENT: ${{ inputs.auto_comment }}
         INPUT_AGENT_TYPE: ${{ inputs.agent_type }}

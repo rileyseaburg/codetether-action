@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Server mode: dispatch task to A2A server, poll for completion, return result.
+# Server mode: dispatch task to A2A server (fire-and-forget).
 # Sourced by entrypoint.sh.
+#
+# Architecture:
+#   GitHub Action → POST /v1/tasks/dispatch → returns task_id → EXIT
+#   Persistent worker picks up task from queue, runs for up to 7 days.
+#   Progress reported via heartbeats to A2A server → GitHub issue comments.
+#
+# The GitHub Action does NOT poll for completion. It dispatches and exits.
 
 # ── Dispatch a task to the CodeTether server ─────────────────────
 # Usage: dispatch_server_task "$description" "$title" "$idempotency_key"
-# Sets: TASK_ID, REVIEW_TEXT
-# Returns: 0 on success, 1 on failure (action should exit non-zero).
+# Sets: TASK_ID
+# Returns: 0 on success, 1 on failure.
 dispatch_server_task() {
   local description="$1"
   local title="$2"
@@ -69,7 +76,6 @@ dispatch_server_task() {
   response="$(cat /tmp/codetether-response.json 2>/dev/null || true)"
   if [ -z "$response" ]; then
     log_error "No response received from server (curl exit ${curl_exit})"
-    REVIEW_TEXT="Server dispatch failed — no response received."
     TASK_ID=""
     return 1
   fi
@@ -77,7 +83,6 @@ dispatch_server_task() {
 
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
     log_error "Server returned HTTP ${http_code}: ${response}"
-    REVIEW_TEXT="Server dispatch failed (HTTP ${http_code})."
     TASK_ID=""
     return 1
   fi
@@ -87,76 +92,47 @@ dispatch_server_task() {
 
   if [ "$TASK_ID" = "unknown" ]; then
     log_error "Failed to dispatch task: ${response}"
-    REVIEW_TEXT="Failed to dispatch task."
     return 1
   fi
+
+  # ── Fire-and-forget: task is queued. Exit immediately. ─────────
+  # The persistent worker will pick it up, run it, and report
+  # progress via GitHub comments and A2A server heartbeats.
+  log_info "Task ${TASK_ID} queued — persistent worker will execute"
+  return 0
 }
 
-# ── Poll server for task completion ──────────────────────────────
-# Sets: REVIEW_TEXT, TASK_STATUS
-# Returns: 0 if completed successfully, 1 if failed/timeout (action should exit non-zero).
-poll_task_result() {
-  checkpoint "server: BEFORE poll_task_result — task ${TASK_ID}, max_wait=${TASK_WAIT_SECONDS}s"
-  local poll_interval=5
-  local max_poll=$(( (TASK_WAIT_SECONDS + poll_interval - 1) / poll_interval ))
-  local poll_count=0
-  local task_status="pending"
-  local task_response='{}'
-  TASK_STATUS="$task_status"
+# ── Post dispatch notification comment ────────────────────────────
+# Posts a comment on the issue/PR with the task_id and tracking URL.
+# This replaces the old polling loop — the user monitors progress
+# via GitHub comments, not by watching the Action job.
+post_dispatch_notification() {
+  local target_number="$1"
+  local task_id="$2"
+  local task_title="$3"
+  local tracking_url="${CODETETHER_SERVER}/v1/tasks/${task_id}"
 
-  while [ "$poll_count" -lt "$max_poll" ] \
-      && [ "$task_status" != "completed" ] \
-      && [ "$task_status" != "failed" ] \
-      && [ "$task_status" != "canceled" ] \
-      && [ "$task_status" != "cancelled" ]; do
-    sleep "$poll_interval"
-    poll_count=$((poll_count + 1))
-    # Log a checkpoint every 10 polls (every 50s) to avoid log spam but still have breadcrumbs
-    if [ $((poll_count % 10)) -eq 0 ] || [ "$task_status" = "completed" ] || [ "$task_status" = "failed" ]; then
-      checkpoint "server: poll ${poll_count}/${max_poll} — status=${task_status}"
-    else
-      echo "  Poll ${poll_count}/${max_poll}: status=${task_status}" | tee -a "${CODETETHER_LOG_FILE}"
-    fi
-    checkpoint "server: BEFORE curl GET task status"
-    task_response=$(curl -fsSL \
-      -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
-      "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}" 2>/dev/null || echo '{}')
-    task_status=$(echo "$task_response" | jq -r '.status // "unknown"')
-    TASK_STATUS="$task_status"
-  done
+  local notification_comment="## 🚀 CodeTether Task Dispatched
 
-  # Export for callers that need the final status
-  TASK_STATUS="$task_status"
+**Task**: \`${task_id}\`
+**Title**: ${task_title}
 
-  if [ "$task_status" = "completed" ]; then
-    checkpoint "server: Task completed — fetching result"
-    local result_response
-    result_response=$(curl -fsSL \
-      -H "Authorization: Bearer ${CODETETHER_TOKEN}" \
-      "${CODETETHER_SERVER}/v1/tasks/dispatch/${TASK_ID}")
-    local result_text
-    result_text=$(echo "$result_response" | jq -r '.result // "No response returned."')
-    REVIEW_TEXT="${result_text:0:65000}"
-    save_artifact "task-result.txt" "$REVIEW_TEXT"
-    log_info "Task ${TASK_ID} completed successfully"
-    return 0
-  elif [ "$task_status" = "failed" ] || [ "$task_status" = "canceled" ] || [ "$task_status" = "cancelled" ]; then
-    local error_text
-    error_text=$(echo "$task_response" | jq -r '.error // .result // empty')
-    if [ -n "$error_text" ]; then
-      REVIEW_TEXT="Task ${task_status}. ${error_text} Task ID: ${TASK_ID}"
-    else
-      REVIEW_TEXT="Task ${task_status}. Check server logs for task ${TASK_ID}."
-    fi
-    log_error "Task ${TASK_ID} ${task_status^^} on the server"
-    save_artifact "task-failure.txt" "Task ${TASK_ID} failed with status: ${task_status}"
-    return 1
-  else
-    REVIEW_TEXT="Task timed out after ${TASK_WAIT_SECONDS}s (status: ${task_status}). Task ID: ${TASK_ID}"
-    log_error "Task ${TASK_ID} TIMED OUT — status was '${task_status}' after ${TASK_WAIT_SECONDS}s"
-    save_artifact "task-timeout.txt" "Task ${TASK_ID} timed out with status: ${task_status}"
-    return 1
-  fi
+A persistent worker will pick up this task and execute it. Progress will be posted as comments on this issue/PR.
+
+<details><summary>Tracking</summary>
+
+- **Task API**: ${tracking_url}
+- **Status**: Queued — waiting for worker
+
+</details>
+
+> _This GitHub Action job has completed. The task runs asynchronously on a persistent worker._
+
+---
+_Task dispatched by [CodeTether](https://codetether.run) — [View task](${tracking_url})_"
+
+  post_github_comment "${target_number}" "$(truncate_str "$notification_comment" 65000)"
+  log_info "Dispatch notification posted to #${target_number} for task ${task_id}"
 }
 
 # ── Validate/coerce a non-negative integer input ─────────────────
@@ -176,22 +152,32 @@ normalize_non_negative_integer() {
 build_metadata_json() {
   local pr_number="${PR_NUMBER:-0}"
   local steps="${INPUT_MAX_STEPS:-50}"
-  local timeout="${TASK_WAIT_SECONDS:-3600}"
-  local normalized_steps normalized_timeout
+  local normalized_steps
   normalized_steps="$(normalize_non_negative_integer "${steps}" "max_steps")" || return 1
-  normalized_timeout="$(normalize_non_negative_integer "${timeout}" "task_timeout_seconds")" || return 1
+  local timeout_secs="${TASK_TIMEOUT_SECONDS:-$(( 168 * 3600 ))}"
+  local github_server="${GITHUB_SERVER_URL:-https://github.com}"
+  local issue_url="${github_server}/${REPO_FULL_NAME}/issues/${pr_number}"
   jq -n \
     --arg source "github-actions" \
     --arg repo "${REPO_FULL_NAME}" \
     --argjson pr_num "${pr_number:-0}" \
     --argjson max_steps "${normalized_steps}" \
-    --argjson task_timeout_seconds "${normalized_timeout}" \
+    --argjson task_timeout_seconds "${timeout_secs}" \
+    --arg github_run_id "${GITHUB_RUN_ID:-}" \
+    --arg github_server_url "${github_server}" \
+    --arg github_issue_url "${issue_url}" \
+    --argjson github_issue_number "${pr_number:-0}" \
     '{
       source: $source,
       repo: $repo,
       pr_number: $pr_num,
       issue_number: $pr_num,
+      github_issue_url: $github_issue_url,
+      github_issue_number: $github_issue_number,
       max_steps: $max_steps,
-      task_timeout_seconds: $task_timeout_seconds
+      task_timeout_seconds: $task_timeout_seconds,
+      github_run_id: $github_run_id,
+      github_server_url: $github_server_url,
+      dispatch_mode: "fire-and-forget"
     }'
 }
