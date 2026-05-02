@@ -1,161 +1,154 @@
-# CodeTether Code Review — GitHub Action
+# CodeTether GitHub Action
 
-AI-powered code review and PR fix automation. Add this action to any repo in 30 seconds.
+AI-powered code review and automated issue resolution for GitHub repositories.
 
-## Quick Start
+## Two Integration Paths
 
-1. Sign up at [codetether.run](https://codetether.run)
-2. Go to **Settings → API Tokens** and create a token
-3. Add it as a repository secret: `CODETETHER_TOKEN`
-4. Create `.github/workflows/codetether-review.yml`:
+### Path 1: GitHub App (Recommended — Zero Config)
+
+Install the [CodeTether GitHub App](https://github.com/apps/codetether) on your repository. That's it. No workflow file, no secrets, no action.
+
+```
+User comments "@codetether fix this" on an issue
+       |
+       v
+GitHub sends webhook to CodeTether server
+       |
+       v
+Server queues task -> Persistent worker picks it up
+       |
+       +-- Clones repo
+       +-- Runs agent (up to 7 days)
+       +-- Pushes commits incrementally
+       +-- Posts progress as GitHub comments
+```
+
+**Benefits:**
+- No workflow file needed in your repo
+- No secrets to manage
+- No GitHub Actions runner used (zero compute cost to you)
+- Tasks run on CodeTether infrastructure for up to 7 days
+- Progress reported as GitHub issue/PR comments
+- Works with private repositories (grant the app access)
+
+**Setup:**
+1. Go to [github.com/apps/codetether](https://github.com/apps/codetether)
+2. Install it on your repo or organization
+3. Comment `@codetether` on any issue or PR
+
+### Path 2: GitHub Action (For Repos Without the App)
+
+For repositories where you can't install the GitHub App (e.g., restricted org policies), use this action. It dispatches a task to the CodeTether server using your API token.
 
 ```yaml
-name: CodeTether Review
-
+name: CodeTether
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  issues:
+    types: [opened, edited]
   issue_comment:
     types: [created]
-  pull_request_review_comment:
-    types: [created]
-
-concurrency:
-  group: codetether-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  pull_request:
+    types: [opened, synchronize]
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: >
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' &&
-       contains(github.event.comment.body, '@codetether')) ||
-      (github.event_name == 'pull_request_review_comment' &&
-       contains(github.event.comment.body, '@codetether'))
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: CodeTether Review
-        uses: rileyseaburg/codetether-action@v1
+      - uses: rileyseaburg/codetether-action@main
         with:
           token: ${{ secrets.CODETETHER_TOKEN }}
 ```
 
-That's it. Every PR gets an automated review comment.
+The action dispatches the task and **exits immediately**. A persistent CodeTether worker picks it up, runs it, and reports progress via GitHub comments. The GitHub Action job completes in seconds.
 
-## Features
+Get your token at [codetether.run](https://codetether.run) -> Settings -> API Tokens.
 
-- **Automatic PR reviews** on every push
-- **Issue responses** — assign issues or comment `@codetether` to get AI analysis
-- **PR comment replies** — `@codetether` on a PR comment for contextual review
-- **Auto-fix** — comment `@codetether fix this` to push a commit directly to the PR branch
-- **Server mode** (default) — no API keys needed, runs on CodeTether cloud
-- **Local mode** (BYOK) — run on your own infrastructure with your own LLM keys
+## How It Works
 
-## Presets
+### Webhook Path (GitHub App)
 
-Run multiple specialized reviews on the same PR by using the `preset` input:
-
-```yaml
-jobs:
-  security:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: rileyseaburg/codetether-action@v1
-        with:
-          token: ${{ secrets.CODETETHER_TOKEN }}
-          preset: security
-
-  quality:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: rileyseaburg/codetether-action@v1
-        with:
-          token: ${{ secrets.CODETETHER_TOKEN }}
-          preset: quality
+```
+GitHub webhook -> POST /v1/webhooks/github -> handle_fix_request()
+    -> queue_github_comment_task()
+    -> Worker: ensure_workspace() -> create_clone_task() -> create_build_task()
+    -> Worker runs for as long as needed
+    -> Progress posted as GitHub issue comments
 ```
 
-### Built-in Presets
+All execution happens server-side on CodeTether's Knative cluster with persistent workers. No GitHub Actions runner is involved.
 
-| Preset | Focus | Icon |
-|--------|-------|------|
-| `review` | General review (bugs, security, perf, style) | 🔍 |
-| `security` | OWASP Top 10, injection, auth, crypto, supply chain | 🔒 |
-| `quality` | Readability, complexity, DRY, testing, docs | ✨ |
-| `performance` | Algorithmic complexity, memory, I/O, concurrency | ⚡ |
-| `architecture` | Coupling, API design, extensibility, trade-offs | 🏗️ |
-| *(freeform text)* | Custom instructions — any string becomes the reviewer prompt | — |
+### Action Path (Without the App)
 
-Each preset posts a separate comment with its own icon, so you can run them in parallel.
+```
+GitHub Action -> POST /v1/tasks/dispatch -> task queued -> EXIT (seconds)
+Persistent worker -> claims task -> runs for up to 7 days -> posts progress
+```
 
-## Inputs
+The action is a thin dispatcher. It sends the task to CodeTether and exits. The actual work happens on persistent workers.
+
+## Which Path Should You Use?
+
+| | GitHub App | GitHub Action |
+|---|---|---|
+| **Setup** | One-click install | Add workflow file + secret |
+| **Workflow file** | Not needed | Required |
+| **Secrets** | None | `CODETETHER_TOKEN` |
+| **Compute cost** | Zero (runs on our infra) | Seconds of runner time |
+| **Triggers** | All GitHub events via webhook | Limited to workflow triggers |
+| **Recommended?** | Yes | Only if you can't install the app |
+
+## Action Inputs
 
 | Input | Description | Default |
 |-------|-------------|---------|
-| `token` | CodeTether API token (**required**) | — |
-| `server_url` | CodeTether server URL | `https://api.codetether.run` |
-| `mode` | `server` or `local` | `server` |
-| `preset` | Review focus: `review`, `security`, `quality`, `performance`, `architecture`, or freeform | `review` |
-| `extra_prompt` | Additional instructions for the reviewer | `""` |
-| `auto_comment` | Post review as PR comment | `true` |
-| `agent_type` | Agent type for task dispatch (overridden by preset) | `code-review` |
-| `model` | LLM model (local mode) | `glm-5.1` |
-| `max_steps` | Max agentic iterations (local mode) | `30` |
-| `task_wait_seconds` | Timeout for server tasks | `1200` |
-| `workspace_path` | Repo path to review | `""` |
+| `token` | CodeTether API token (required) | — |
+| `server_url` | Server URL | `https://api.codetether.run` |
+| `preset` | Review focus: `review`, `security`, `quality`, `performance`, `architecture`, or custom | `review` |
+| `extra_prompt` | Additional instructions for the agent | `""` |
+| `auto_comment` | Post results as comments | `true` |
+| `max_steps` | Max agentic loop iterations | `50` |
+| `fail_on_error` | Fail workflow on dispatch error | `true` |
 
-### Local Mode (BYOK)
-
-To run the agent on your own runner with your own LLM keys:
-
-```yaml
-- uses: rileyseaburg/codetether-action@v1
-  with:
-    mode: local
-    api_key: ${{ secrets.OPENAI_API_KEY }}
-    model: gpt-4o
-    max_steps: "60"
-```
-
-## Outputs
+## Action Outputs
 
 | Output | Description |
 |--------|-------------|
-| `review` | Full review text |
-| `exit_code` | 0 on success, non-zero on failure |
+| `task_id` | Server task ID for tracking |
+| `review` | Dispatch confirmation with task_id |
+| `exit_code` | 0 = dispatch succeeded |
 
-## Auto-Fix
+## Monitoring Task Progress
 
-Comment on a PR with `@codetether fix <description>` and the action will:
+1. **GitHub Comments** — Progress is posted as comments on the issue/PR
+2. **Task API** — `GET https://api.codetether.run/v1/tasks/{task_id}`
+3. **Dashboard** — [codetether.run](https://codetether.run) dashboard
 
-1. Check out the PR branch
-2. Apply the requested changes
-3. Run validation
-4. Commit and push
+## Presets
 
-> **Note:** Auto-fix only works in local mode and on non-forked PRs.
+- **review** — General code review (bugs, security, performance, style)
+- **security** — OWASP-focused security audit
+- **quality** — Code quality, complexity, testing, documentation
+- **performance** — Algorithmic complexity, memory, I/O, concurrency
+- **architecture** — Separation of concerns, coupling, API design, extensibility
 
-## Pricing
+## Architecture
 
-- **Server mode**: Uses your [codetether.run](https://codetether.run) subscription
-- **Local mode**: Free — bring your own LLM API keys
+### Why No Execution in the Action?
+
+Previous versions ran the agent inside the GitHub Actions runner. This was unreliable:
+
+- GitHub Actions max timeout is 72 hours (often 45 min in practice)
+- Cold starts on every run — no persistent state
+- If the runner died, all work was lost
+- No progress visibility while running
+
+The webhook path eliminates all of these problems:
+- No GitHub Actions runner used at all (for the GitHub App path)
+- Persistent workers survive pod recycles (state in database)
+- Tasks can run for up to 7 days
+- Progress visible via GitHub comments in real-time
+- Worker pushes commits incrementally as it works
 
 ## License
 
