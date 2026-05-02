@@ -24,7 +24,19 @@ fi
 
 # ── Shared variables ─────────────────────────────────────────────
 WORKSPACE_PATH="${INPUT_WORKSPACE_PATH:-${GITHUB_WORKSPACE:-$PWD}}"
-TASK_WAIT_SECONDS="${INPUT_TASK_WAIT_SECONDS:-1200}"
+TASK_TIMEOUT_SECONDS=""
+if [ -n "${INPUT_TASK_TIMEOUT_HOURS:-}" ]; then
+  # Convert hours to seconds (supports up to 604800 = 168 hours = 7 days)
+  local_hours="$(printf '%s' "${INPUT_TASK_TIMEOUT_HOURS}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [[ "$local_hours" =~ ^[0-9]+$ ]]; then
+    TASK_TIMEOUT_SECONDS=$(( local_hours * 3600 ))
+  else
+    log_warn "task_timeout_hours invalid ('${INPUT_TASK_TIMEOUT_HOURS}'), defaulting to 168h"
+    TASK_TIMEOUT_SECONDS=$(( 168 * 3600 ))
+  fi
+else
+  TASK_TIMEOUT_SECONDS=$(( 168 * 3600 ))
+fi
 mkdir -p "${WORKSPACE_PATH}"
 
 # ── Logging and artifact persistence ─────────────────────────────
