@@ -69,6 +69,10 @@ inputs:
     description: "Maximum time the persistent worker may run before the task is reaped (hours, default 168 = 7 days)"
     required: false
     default: "168"
+  task_wait_seconds:
+    description: "Deprecated compatibility no-op. Server mode is fire-and-forget; execution status is reported asynchronously."
+    required: false
+    default: ""
   timeout_minutes:
     description: "GitHub Actions job-level timeout in minutes (set this in your workflow's timeout-minutes, not here)"
     required: false
