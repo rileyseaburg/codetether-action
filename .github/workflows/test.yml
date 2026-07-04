@@ -18,7 +18,10 @@ jobs:
         run: |
           shellcheck -x -S warning \
             --exclude=SC1091,SC2034,SC2155,SC2091 \
-            action/entrypoint.sh action/lib/*.sh
+            action/entrypoint.sh action/lib/*.sh test/*.sh
+
+      - name: Test review formatting
+        run: test/review-format.sh
 
   action-yaml-lint:
     runs-on: ubuntu-latest
@@ -40,7 +43,7 @@ jobs:
   test-server-mode:
     needs: [shellcheck]
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:

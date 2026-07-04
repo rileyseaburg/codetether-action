@@ -101,6 +101,23 @@ ${diff_text}
 \`\`\`"
 }
 
+# ── Normalize review output for GitHub comments ──────────────────
+# Converts accidental JSON or fully fenced responses into readable
+# Markdown instead of posting a badly rendered PR comment.
+normalize_review_markdown() {
+  local text="$1"
+  text="$(printf '%s' "$text" | sed 's/[[:space:]]*$//')"
+  if printf '%s' "$text" | jq -e . >/dev/null 2>&1; then
+    printf '## Summary\n- CodeTether returned structured JSON instead of Markdown.\n\n## Findings\n```json\n%s\n```\n\n## Validation Notes\n- Review output was normalized by the GitHub Action.\n' "$text"
+    return
+  fi
+  if printf '%s\n' "$text" | sed '/^[[:space:]]*$/d' | head -n 1 | grep -q '^```'; then
+    printf '## Summary\n- CodeTether returned a fenced response.\n\n## Findings\n%s\n\n## Validation Notes\n- Review output was normalized by the GitHub Action.\n' "$text"
+    return
+  fi
+  printf '%s\n' "$text"
+}
+
 # ── Execute local review and post comment ────────────────────────
 # FAILS CLOSED: exits non-zero if codetether fails.
 run_local_review() {
@@ -116,6 +133,7 @@ run_local_review() {
 
   local review_text
   review_text=$(cat "$review_file")
+  review_text="$(normalize_review_markdown "$review_text")"
   review_text="${review_text:0:65000}"
   write_review_output "$review_text" "$exit_code"
 

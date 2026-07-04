@@ -2,6 +2,33 @@
 # Preset prompt templates for different review focuses.
 # Sourced by entrypoint.sh.
 
+# ── Shared review output contract ────────────────────────────────
+# Keep this separate from each preset so every review mode produces a
+# stable GitHub-friendly comment body. The worker/action should not emit
+# JSON, YAML frontmatter, raw logs, or nested markdown fences as the
+# top-level answer because those formats render poorly in PR comments.
+review_format_contract() {
+  cat <<'EOF'
+
+Format your response exactly as GitHub-flavored Markdown using this structure:
+
+## Summary
+- One or two bullets describing the change and overall risk.
+
+## Findings
+- Use one bullet per actionable finding.
+- Start each finding with a severity label: **Critical**, **High**, **Medium**, **Low**, or **Info**.
+- Include file path and line/hunk context when available.
+- If there are no actionable findings, write exactly: "No actionable findings."
+
+## Validation Notes
+- Mention tests or checks that appear relevant from the diff.
+- Do not claim tests passed unless the diff or prompt provides evidence.
+
+Do not output JSON. Do not wrap the entire response in a code block. Do not include chain-of-thought or raw tool logs.
+EOF
+}
+
 # ── Map preset name to a review prompt ───────────────────────────
 # If INPUT_PRESET is set, it overrides the default review instructions.
 # Custom presets fall through to extra_prompt only.
@@ -23,7 +50,8 @@ Review the following diff and report:
 4. **Style** — naming, dead code, missing error handling
 
 Be concise. Only comment on real issues, not nitpicks.
-If the code looks good, say so briefly."
+If the code looks good, say so briefly.
+$(review_format_contract)"
       ;;
     security)
       echo "You are a security auditor reviewing PR #${pr_number}: \"${pr_title}\" (${head} → ${base}).
@@ -37,7 +65,8 @@ Perform a thorough security review of the following diff. Focus on:
 6. **Supply chain** — dependency vulnerabilities, unsafe deserialization
 
 Rate each finding as Critical / High / Medium / Low.
-If no security issues are found, say so explicitly."
+If no security issues are found, say so explicitly.
+$(review_format_contract)"
       ;;
     quality)
       echo "You are a code quality reviewer for PR #${pr_number}: \"${pr_title}\" (${head} → ${base}).
@@ -51,7 +80,8 @@ Analyze the following diff for code quality. Focus on:
 6. **Error handling** — swallowed errors, missing error types, panicking paths
 
 Do NOT comment on style trivia (formatting, import order).
-Focus on changes that meaningfully improve maintainability."
+Focus on changes that meaningfully improve maintainability.
+$(review_format_contract)"
       ;;
     performance)
       echo "You are a performance engineer reviewing PR #${pr_number}: \"${pr_title}\" (${head} → ${base}).
@@ -64,7 +94,8 @@ Analyze the following diff for performance implications. Focus on:
 5. **Hot paths** — changes in request handlers, tight loops, or data processing pipelines
 
 Quantify impact where possible (e.g., 'this reduces allocations from O(n) to O(1)').
-If no performance concerns are found, say so explicitly."
+If no performance concerns are found, say so explicitly.
+$(review_format_contract)"
       ;;
     architecture)
       echo "You are a software architect reviewing PR #${pr_number}: \"${pr_title}\" (${head} → ${base}).
@@ -78,13 +109,15 @@ Analyze the following diff for architectural soundness. Focus on:
 6. **Trade-offs** — acknowledge when a simpler approach has acceptable downsides
 
 Consider the diff in the context of the project's existing patterns.
-Suggest concrete alternatives, not just problems."
+Suggest concrete alternatives, not just problems.
+$(review_format_contract)"
       ;;
     *)
       # Custom preset — fall through to extra_prompt only
       echo "You are reviewing PR #${pr_number}: \"${pr_title}\" (${head} → ${base}).
 
-${INPUT_PRESET}"
+${INPUT_PRESET}
+$(review_format_contract)"
       ;;
   esac
 }
