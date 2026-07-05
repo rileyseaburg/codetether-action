@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
-# GitHub API helpers: posting comments, fetching PR metadata, writing outputs,
+# Git/Forge API helpers: posting comments, fetching PR metadata, writing outputs,
 # creating branches, creating PRs, verifying pushes.
 # Sourced by entrypoint.sh.
+
+# ── Resolve API base for GitHub or Forgejo/Gitea runners ─────────
+github_api_base() {
+  if [ -n "${GITHUB_API_URL:-}" ]; then
+    printf '%s\n' "${GITHUB_API_URL%/}"
+    return 0
+  fi
+  local server_url="${GITHUB_SERVER_URL:-https://github.com}"
+  if [ "$server_url" = "https://github.com" ]; then
+    printf '%s\n' "https://api.github.com"
+  else
+    printf '%s\n' "${server_url%/}/api/v1"
+  fi
+}
 
 # ── Post a comment on an issue or PR ─────────────────────────────
 post_github_comment() {
   local target_number="$1"
   local body="$2"
   checkpoint "github: BEFORE post_github_comment #${target_number}"
-  local resp
+  local resp api_base
+  api_base="$(github_api_base)"
   resp=$(curl -sS -o /dev/null -w "%{http_code}" \
     -X POST \
     -H "Authorization: token ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com/repos/${REPO_FULL_NAME}/issues/${target_number}/comments" \
+    -H "Accept: application/json" \
+    "${api_base}/repos/${REPO_FULL_NAME}/issues/${target_number}/comments" \
     -d "$(jq -n --arg body "$body" '{body: $body}')" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$resp" ] && resp="000"
   if [ "$resp" -ge 200 ] && [ "$resp" -lt 300 ]; then
@@ -35,28 +50,31 @@ write_review_output() {
   } >> "$GITHUB_OUTPUT"
 }
 
-# ── GET request to GitHub API ────────────────────────────────────
+# ── GET request to Git/Forge API ─────────────────────────────────
 github_api_get() {
   local path="$1"
+  local api_base
+  api_base="$(github_api_base)"
   curl -fsSL \
     -H "Authorization: token ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com${path}"
+    -H "Accept: application/json" \
+    "${api_base}${path}"
 }
 
-# ── POST request to GitHub API with status check ────────────────
+# ── POST request to Git/Forge API with status check ──────────────
 github_api_post() {
   local path="$1"
   local payload="$2"
-  local desc="${3:-GitHub API call}"
+  local desc="${3:-Git API call}"
   checkpoint "github: BEFORE api_post ${desc} ${path}"
-  local http_code tmp_resp
+  local http_code tmp_resp api_base
+  api_base="$(github_api_base)"
   tmp_resp=$(mktemp)
   http_code=$(curl -sS -o "$tmp_resp" -w "%{http_code}" \
     -X POST \
     -H "Authorization: token ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com${path}" \
+    -H "Accept: application/json" \
+    "${api_base}${path}" \
     -d "$payload" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$http_code" ] && http_code="000"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
@@ -83,11 +101,12 @@ verify_branch_pushed() {
   local branch="$1"
   local encoded_branch
   encoded_branch=$(jq -rn --arg v "$branch" '$v|@uri')
-  local ref_response
+  local ref_response api_base
+  api_base="$(github_api_base)"
   ref_response=$(curl -sS -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github.v3+json" \
-    "https://api.github.com/repos/${REPO_FULL_NAME}/branches/${encoded_branch}" 2>> "${CODETETHER_LOG_FILE}") || :
+    -H "Accept: application/json" \
+    "${api_base}/repos/${REPO_FULL_NAME}/branches/${encoded_branch}" 2>> "${CODETETHER_LOG_FILE}") || :
   [ -z "$ref_response" ] && ref_response="000"
   if [ "$ref_response" -ge 200 ] && [ "$ref_response" -lt 300 ]; then
     log_info "Branch '${branch}' verified on remote (HTTP ${ref_response})"
@@ -160,52 +179,17 @@ create_pull_request() {
     existing=$(github_api_get "/repos/${REPO_FULL_NAME}/pulls?head=${REPO_FULL_NAME%%/*}:${head_branch}&state=open" 2>/dev/null) || true
     existing_number=$(echo "$existing" | jq -r '.[0].number // empty' 2>/dev/null) || true
     if [ -n "$existing_number" ]; then
-      existing_url=$(echo "$existing" | jq -r '.[0].html_url // empty' 2>/dev/null) || true
+      existing_url=$(echo "$existing" | jq -r '.[0].html_url // empty' 2>/dev/null)
       log_info "PR already exists: #${existing_number} — ${existing_url}"
       CREATED_PR_NUMBER="$existing_number"
-      CREATED_PR_URL="${existing_url}"
+      CREATED_PR_URL="$existing_url"
       return 0
     fi
 
     attempt=$((attempt + 1))
-    sleep 2
+    sleep $((attempt * 2))
   done
 
   log_error "Failed to create PR after ${max_retries} attempts"
-  CREATED_PR_NUMBER=""
-  CREATED_PR_URL=""
   return 1
-}
-
-# ── Ensure git push succeeded by checking remote ────────────────
-# Pushes and then verifies the push took effect.
-verified_git_push() {
-  local branch="$1"
-  local remote="${2:-origin}"
-
-  checkpoint "github: BEFORE verified_git_push — ${remote}:${branch}"
-  log_info "Pushing to ${remote}:${branch}..."
-  git push "${remote}" "HEAD:${branch}" 2>&1 | tee -a "${CODETETHER_LOG_FILE}"
-  local push_exit=${PIPESTATUS[0]:-0}
-
-  checkpoint "github: git push exit_code=${push_exit}"
-
-  if [ "$push_exit" -ne 0 ]; then
-    log_error "git push failed with exit code ${push_exit}"
-    return 1
-  fi
-
-  # Give GitHub a moment to reflect the push, then verify
-  sleep 2
-  local sha
-  sha=$(git rev-parse HEAD)
-  checkpoint "github: BEFORE verify_commit_on_branch — ${sha:0:8} on ${branch}"
-  if verify_commit_on_branch "$branch" "$sha"; then
-    checkpoint "github: Push VERIFIED — ${sha:0:8} on ${branch}"
-    return 0
-  else
-    checkpoint "github: Push VERIFICATION FAILED — ${sha:0:8} NOT on ${branch}"
-    log_error "Push verification failed: commit ${sha:0:8} not found on remote branch ${branch}"
-    return 1
-  fi
 }
